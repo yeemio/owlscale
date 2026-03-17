@@ -374,6 +374,7 @@ class TestGhosttyAdapter:
         assert mock_run.called
         args = mock_run.call_args[0][0]
         assert args[0] == "osascript"
+        assert 'send key "enter"' in args[2]
         assert result is True
 
     def test_inject_prompt_with_window_title(self, tmp_path):
@@ -383,6 +384,17 @@ class TestGhosttyAdapter:
             inject_prompt("agent-a", "task-01", window_title="MyAgent")
         script = mock_run.call_args[0][0][2]
         assert "MyAgent" in script
+        assert 'send key "enter"' in script
+
+    def test_inject_prompt_script_contains_send_key_enter(self):
+        from owlscale.adapters.ghostty import inject_prompt
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            inject_prompt("agent-a", "task-01")
+        script = mock_run.call_args[0][0][2]
+        assert "owlscale has new work for agent-a: task-01" in script
+        assert "owlscale whoami agent-a" in script
+        assert 'send key "enter"' in script
 
     def test_inject_prompt_returns_false_on_osascript_error(self):
         from owlscale.adapters.ghostty import inject_prompt

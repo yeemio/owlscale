@@ -40,23 +40,39 @@ class Agent:
     role: AgentRole
     strengths: list[str] = field(default_factory=list)
     constraints: Dict[str, Any] = field(default_factory=dict)
+    tool: Optional[str] = None
+    delivery: Dict[str, Any] = field(default_factory=dict)
+    launch: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        result = {
             "name": self.name,
             "role": self.role.value,
             "strengths": self.strengths,
             "constraints": self.constraints,
         }
+        if self.tool is not None:
+            result["tool"] = self.tool
+        if self.delivery:
+            result["delivery"] = self.delivery
+        if self.launch:
+            result["launch"] = self.launch
+        return result
 
     @staticmethod
     def from_dict(agent_id: str, data: Dict[str, Any]) -> "Agent":
+        tool = data.get("tool")
+        delivery = data.get("delivery", {})
+        launch = data.get("launch", {})
         return Agent(
             id=agent_id,
             name=data.get("name", agent_id),
             role=AgentRole(data.get("role", "executor")),
             strengths=data.get("strengths", []),
             constraints=data.get("constraints", {}),
+            tool=tool if isinstance(tool, str) else None,
+            delivery=delivery if isinstance(delivery, dict) else {},
+            launch=launch if isinstance(launch, dict) else {},
         )
 
 

@@ -1,6 +1,6 @@
 [project]
 name = "owlscale"
-version = "0.3.0"
+version = "0.4.0"
 description = "File-level multi-agent task handoff protocol and CLI"
 readme = "README.md"
 license = { text = "MIT" }
@@ -29,7 +29,7 @@ Issues = "https://github.com/yeemio/owlscale/issues"
 
 [tool.poetry]
 name = "owlscale"
-version = "0.3.0"
+version = "0.4.0"
 description = "File-level multi-agent task handoff protocol and CLI"
 packages = [{ include = "owlscale" }]
 

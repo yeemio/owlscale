@@ -7,6 +7,7 @@ All failures are non-fatal: returns False and logs a warning.
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 
 
@@ -22,25 +23,17 @@ tell application "Ghostty"
     if targetWindow is missing value then
         set targetWindow to front window
     end if
-    tell targetWindow
-        tell current tab
-            tell current terminal
-                input text "{message}\\n"
-            end tell
-        end tell
-    end tell
+    set targetTerminal to focused terminal of selected tab of targetWindow
+    input text "{message}" to targetTerminal
+    send key "enter" to targetTerminal
 end tell
 """
 
 _SCRIPT_FRONT_WINDOW = """\
 tell application "Ghostty"
-    tell front window
-        tell current tab
-            tell current terminal
-                input text "{message}\\n"
-            end tell
-        end tell
-    end tell
+    set targetTerminal to focused terminal of selected tab of front window
+    input text "{message}" to targetTerminal
+    send key "enter" to targetTerminal
 end tell
 """
 
@@ -51,18 +44,19 @@ def inject_prompt(
     window_title: str | None = None,
 ) -> bool:
     """
-    Type a wake-up prompt into the Ghostty terminal.
+    Type a wake-up shell snippet into the Ghostty terminal, then send Enter.
 
     window_title: match Ghostty window by title substring.
     Falls back to front window if None or no match.
     Returns True on success, False on any failure (non-fatal).
     """
-    message = (
-        f"owlscale has new work for {agent_id}: {task_id}"
-        f" — run `owlscale whoami {agent_id}`"
+    message = f"owlscale has new work for {agent_id}: {task_id}"
+    command = (
+        f"printf '%s\\n' {shlex.quote(message)}; "
+        f"owlscale whoami {shlex.quote(agent_id)}"
     )
     # Escape backslashes and double-quotes for AppleScript string literal
-    safe_message = message.replace("\\", "\\\\").replace('"', '\\"')
+    safe_message = command.replace("\\", "\\\\").replace('"', '\\"')
 
     if window_title:
         safe_title = window_title.replace("\\", "\\\\").replace('"', '\\"')
