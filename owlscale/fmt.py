@@ -47,11 +47,7 @@ def _parse_raw(content: str) -> tuple[dict, str]:
         raise ValueError("Missing closing ---")
 
     yaml_content = "\n".join(lines[1:end_idx])
-    try:
-        import yaml
-        fm_dict = yaml.safe_load(yaml_content) or {}
-    except ImportError:
-        raise ImportError("owlscale fmt requires PyYAML: pip install pyyaml")
+    fm_dict = yaml.safe_load(yaml_content) or {}
     body = "\n".join(lines[end_idx + 1:]).lstrip("\n")
     return fm_dict, body
 
@@ -100,7 +96,6 @@ def _reorder_frontmatter(fm_dict: dict) -> dict:
 def _build_formatted(fm_dict: dict, sections: list[tuple[str, str, str]], numbered: bool) -> str:
     """Build the formatted markdown string."""
     ordered_fm = _reorder_frontmatter(fm_dict)
-    import yaml
     yaml_str = yaml.dump(ordered_fm, default_flow_style=False, sort_keys=False, allow_unicode=True)
     lines = [f"---\n{yaml_str}---"]
 

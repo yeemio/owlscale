@@ -34,11 +34,7 @@ def _parse_raw(content: str) -> tuple[dict, str]:
         raise ValueError("Missing closing ---")
 
     yaml_content = "\n".join(lines[1:end_idx])
-    try:
-        import yaml
-        fm_dict = yaml.safe_load(yaml_content) or {}
-    except ImportError:
-        raise ImportError("owlscale diff requires PyYAML: pip install pyyaml")
+    fm_dict = yaml.safe_load(yaml_content) or {}
     body = "\n".join(lines[end_idx + 1:])
     return fm_dict, body
 
