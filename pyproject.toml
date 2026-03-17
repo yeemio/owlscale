@@ -1,0 +1,47 @@
+[project]
+name = "owlscale"
+version = "0.1.0"
+description = "File-level multi-agent task handoff protocol and CLI"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "yeemio", email = "yeemio@users.noreply.github.com" }]
+requires-python = ">=3.10"
+keywords = ["multi-agent", "ai", "protocol", "cli", "llm"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.scripts]
+owlscale = "owlscale.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/yeemio/owlscale"
+Repository = "https://github.com/yeemio/owlscale"
+Issues = "https://github.com/yeemio/owlscale/issues"
+
+[tool.poetry]
+name = "owlscale"
+version = "0.1.0"
+description = "File-level multi-agent task handoff protocol and CLI"
+packages = [{ include = "owlscale" }]
+
+[tool.poetry.dependencies]
+python = ">=3.10,<4.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
