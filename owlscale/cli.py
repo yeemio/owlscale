@@ -15,6 +15,24 @@ from owlscale.models import TaskStatus
 from owlscale.watch import watch_once, watch_poll
 
 
+def _refresh_context_safe(owlscale_dir: Path, agent_id: str) -> None:
+    """Refresh an agent's context file. Non-fatal."""
+    try:
+        from owlscale.identity import refresh_agent_context
+        refresh_agent_context(owlscale_dir, agent_id)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _refresh_all_contexts_safe(owlscale_dir: Path) -> None:
+    """Refresh all agents' context files. Non-fatal."""
+    try:
+        from owlscale.identity import refresh_all_contexts
+        refresh_all_contexts(owlscale_dir)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="owlscale",
@@ -30,6 +48,7 @@ def main():
         "--register-defaults", action="store_true",
         help="Auto-detect AI agents (CC, Copilot, Cursor, etc.) and register them",
     )
+    init_parser.add_argument("--name", help="Project name (stored in .owlscale/config.json)")
     init_parser.set_defaults(func=cmd_init)
 
     # roster
@@ -217,6 +236,12 @@ def main():
     history_parser.add_argument("--json", action="store_true", dest="as_json", help="Output as JSON")
     history_parser.set_defaults(func=cmd_history)
 
+    whoami_parser = subparsers.add_parser("whoami", help="Print agent context file")
+    whoami_parser.add_argument("agent_id", nargs="?", help="Agent ID to show context for")
+    whoami_parser.add_argument("--all", action="store_true", dest="all_agents",
+                               help="Refresh all agents and list paths")
+    whoami_parser.set_defaults(func=cmd_whoami)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -240,12 +265,22 @@ def cmd_init(args):
 
     owlscale_dir = init_project(root)
 
+    project_name = getattr(args, "name", None)
+    if project_name:
+        import json as _json
+        config_path = owlscale_dir / "config.json"
+        config = _json.loads(config_path.read_text()) if config_path.exists() else {}
+        config["name"] = project_name
+        config_path.write_text(_json.dumps(config, indent=2))
+
     if existed:
         print(f"✓ .owlscale/ already exists at {owlscale_dir} (not overwriting)")
     else:
         print(f"✓ Initialized .owlscale/ at {owlscale_dir}")
         print("  Created: packets/, returns/, log/, templates/")
         print("  Created: state.json, roster.json")
+    if project_name:
+        print(f"  Project name: {project_name}")
 
     if hasattr(args, "register_defaults") and args.register_defaults:
         from owlscale.defaults import register_defaults
@@ -266,6 +301,7 @@ def cmd_roster_add(args):
     owlscale_dir = get_workspace_root()
     agent = add_agent(owlscale_dir, args.agent_id, args.name, args.role)
     print(f"✓ Registered agent: {agent.id} ({agent.role.value})")
+    _refresh_context_safe(owlscale_dir, agent.id)
 
 
 def cmd_roster_list(args):
@@ -373,6 +409,8 @@ def cmd_dispatch(args):
             else:
                 print(f"  ⚠ Branch already exists: {branch}")
 
+    _refresh_context_safe(owlscale_dir, agent_id)
+
 
 def cmd_claim(args):
     """Claim a dispatched task."""
@@ -386,6 +424,7 @@ def cmd_return(args):
     owlscale_dir = get_workspace_root()
     return_task(owlscale_dir, args.task_id)
     print(f"✓ Marked task '{args.task_id}' as returned")
+    _refresh_all_contexts_safe(owlscale_dir)
 
 
 def cmd_accept(args):
@@ -393,6 +432,7 @@ def cmd_accept(args):
     owlscale_dir = get_workspace_root()
     accept_task(owlscale_dir, args.task_id)
     print(f"✓ Accepted task '{args.task_id}'")
+    _refresh_all_contexts_safe(owlscale_dir)
 
 
 def cmd_reject(args):
@@ -402,6 +442,7 @@ def cmd_reject(args):
     print(f"✓ Rejected task '{args.task_id}'")
     if args.reason:
         print(f"  Reason: {args.reason}")
+    _refresh_all_contexts_safe(owlscale_dir)
 
 
 def cmd_status(args):
@@ -803,6 +844,33 @@ def cmd_history(args):
         print(f"\nReturn preview:")
         for line in history.return_preview.splitlines():
             print(f"  {line}")
+
+
+def cmd_whoami(args):
+    """Print or refresh agent context file(s)."""
+    owlscale_dir = get_workspace_root()
+
+    if getattr(args, "all_agents", False):
+        from owlscale.identity import refresh_all_contexts
+        refresh_all_contexts(owlscale_dir)
+        agents = list_agents(owlscale_dir)
+        if not agents:
+            print("No agents registered.")
+            return
+        for agent in sorted(agents, key=lambda a: a.id):
+            path = owlscale_dir / "agents" / f"{agent.id}.md"
+            print(f"  {agent.id}: {path}")
+        return
+
+    agent_id = getattr(args, "agent_id", None)
+    if not agent_id:
+        print("Usage: owlscale whoami <agent-id> | --all", file=sys.stderr)
+        sys.exit(1)
+
+    from owlscale.identity import refresh_agent_context, get_agent_context
+    refresh_agent_context(owlscale_dir, agent_id)
+    content = get_agent_context(owlscale_dir, agent_id)
+    print(content)
 
 
 if __name__ == "__main__":
