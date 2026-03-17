@@ -242,6 +242,30 @@ def main():
                                help="Refresh all agents and list paths")
     whoami_parser.set_defaults(func=cmd_whoami)
 
+    daemon_parser = subparsers.add_parser("daemon", help="Background task monitor")
+    daemon_subs = daemon_parser.add_subparsers(dest="daemon_cmd")
+    daemon_parser.set_defaults(func=cmd_daemon_help)
+
+    d_run = daemon_subs.add_parser("run", help="Run daemon in foreground")
+    d_run.add_argument("--poll", type=float, default=1.0, help="Poll interval in seconds")
+    d_run.add_argument("--drive-shell", action="store_true", help="Invoke delivery adapters")
+    d_run.set_defaults(func=cmd_daemon_run)
+
+    d_start = daemon_subs.add_parser("start", help="Start daemon in background")
+    d_start.add_argument("--poll", type=float, default=1.0)
+    d_start.add_argument("--drive-shell", action="store_true")
+    d_start.set_defaults(func=cmd_daemon_start)
+
+    d_stop = daemon_subs.add_parser("stop", help="Stop background daemon")
+    d_stop.set_defaults(func=cmd_daemon_stop)
+
+    d_status = daemon_subs.add_parser("status", help="Show daemon status")
+    d_status.set_defaults(func=cmd_daemon_status)
+
+    d_logs = daemon_subs.add_parser("logs", help="Tail daemon log")
+    d_logs.add_argument("-n", type=int, default=50, help="Number of lines")
+    d_logs.set_defaults(func=cmd_daemon_logs)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -871,6 +895,71 @@ def cmd_whoami(args):
     refresh_agent_context(owlscale_dir, agent_id)
     content = get_agent_context(owlscale_dir, agent_id)
     print(content)
+
+
+def cmd_daemon_help(args):
+    """Print daemon subcommand help."""
+    print("Usage: owlscale daemon <run|start|stop|status|logs>")
+
+
+def cmd_daemon_run(args):
+    """Run daemon in foreground."""
+    from owlscale.daemon import run_daemon
+    owlscale_dir = get_workspace_root()
+    print(f"Starting daemon (foreground, poll={args.poll}s) — Ctrl-C to stop")
+    run_daemon(owlscale_dir, poll_interval=args.poll, drive_shell=args.drive_shell)
+
+
+def cmd_daemon_start(args):
+    """Start daemon in background."""
+    from owlscale.daemon import start_daemon, get_daemon_status
+    owlscale_dir = get_workspace_root()
+    status = get_daemon_status(owlscale_dir)
+    if status["running"]:
+        print(f"owlscale daemon: already running (pid {status['pid']})")
+        return
+    pid = start_daemon(owlscale_dir, poll_interval=args.poll, drive_shell=args.drive_shell)
+    print(f"✓ owlscale daemon started (pid {pid})")
+
+
+def cmd_daemon_stop(args):
+    """Stop background daemon."""
+    from owlscale.daemon import stop_daemon
+    owlscale_dir = get_workspace_root()
+    stopped = stop_daemon(owlscale_dir)
+    if stopped:
+        print("✓ owlscale daemon stopped")
+    else:
+        print("owlscale daemon: not running")
+
+
+def cmd_daemon_status(args):
+    """Show daemon status."""
+    from owlscale.daemon import get_daemon_status
+    owlscale_dir = get_workspace_root()
+    s = get_daemon_status(owlscale_dir)
+    if s["running"]:
+        print(f"owlscale daemon: running (pid {s['pid']})")
+        if s["started_at"]:
+            print(f"  started:  {s['started_at']}")
+        if s["poll_interval"] is not None:
+            print(f"  poll:     {s['poll_interval']}s")
+        if s["mode"]:
+            print(f"  mode:     {s['mode']}")
+        print(f"  triggers: {s['trigger_seq']}")
+    else:
+        print("owlscale daemon: not running")
+
+
+def cmd_daemon_logs(args):
+    """Tail daemon log."""
+    from owlscale.daemon import tail_daemon_log
+    owlscale_dir = get_workspace_root()
+    lines = tail_daemon_log(owlscale_dir, n=args.n)
+    if not lines:
+        print("(no daemon log)")
+    else:
+        print("\n".join(lines))
 
 
 if __name__ == "__main__":
