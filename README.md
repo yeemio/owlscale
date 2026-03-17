@@ -23,12 +23,30 @@ Requires Python 3.10+.
 ## Quick start
 
 ```bash
-# Initialize workspace
+# See what AI tools are installed on your machine
+owlscale detect
+
+# Initialize workspace — auto-detects tools, suggests roster, optionally launches terminals
 owlscale init
 
-# Register agents
+# Or watch a safe demo first (runs in a temp directory, never touches your files)
+owlscale demo
+```
+
+`owlscale init` detects Claude Code, Copilot CLI, Codex, Cursor, and VSCode, suggests a roster, and optionally opens terminal windows for each agent — all in under 60 seconds.
+
+---
+
+## Full workflow
+
+```bash
+# Register agents manually (or let init do it)
 owlscale roster add copilot --name "GitHub Copilot" --role executor
 owlscale roster add cc      --name "Claude Code"    --role coordinator
+
+# Launch agent terminals
+owlscale launch cc
+owlscale launch --all
 
 # Create a task
 owlscale pack implement-auth --goal "Add JWT authentication to the API"
@@ -91,9 +109,16 @@ your-project/
 ## CLI reference
 
 ```
-owlscale init                          Initialize workspace
+owlscale init [--yes] [--no-launch] [--force]
+                                       Initialize workspace with auto-detect
+owlscale detect [--json]               Scan for AI tools and terminals
+owlscale demo [--fast] [--no-color]    Self-contained onboarding walkthrough
+
 owlscale roster add <id> --name --role Register an agent
 owlscale roster list                   List agents
+owlscale launch <agent-id>             Open terminal for an agent
+owlscale launch --all                  Open terminals for all agents
+
 owlscale pack <id> --goal <text>       Create a Context Packet
 owlscale dispatch <id> <agent>         Dispatch task to agent
 owlscale claim <id>                    Claim task (→ in_progress)
@@ -102,18 +127,20 @@ owlscale accept <id>                   Accept result
 owlscale reject <id> [--reason]        Reject result
 owlscale status                        Show all task states
 owlscale log [--task <id>]             Show operation log
+
 owlscale validate <id>                 Validate a Context Packet
 owlscale fmt <id>                      Format packet frontmatter
-owlscale export [--output file.jsonl]  Export training data
-owlscale route <id>                    Suggest best agent (roster-based)
+owlscale lint <id> / lint --all        Packet quality checks
 owlscale diff <id-a> <id-b>            Diff two packets
 owlscale stats                         Workspace statistics
-owlscale lint <id> / lint --all        Packet quality checks
+owlscale history <id>                  Full task event timeline
 owlscale prune [--days N] [--dry-run]  Archive old completed tasks
+
+owlscale route <id>                    Suggest best agent (roster-based)
+owlscale export [--output file.jsonl]  Export training data
 owlscale git branch <id>               Show/create branch for task
 owlscale git pr <id>                   Print gh pr create command
 owlscale git status                    Task-to-branch mapping
-owlscale history <id>                  Full task event timeline
 owlscale alias set <alias> <agent-id>  Set agent alias
 owlscale template list/show/add/remove Manage packet templates
 owlscale watch                         Watch for status changes
@@ -128,6 +155,31 @@ owlscale watch                         Watch for status changes
 - **Agent-agnostic** — works with Claude, Copilot, GPT, local models, or humans
 - **Git-native** — branch naming and PR commands built in
 - **Composable** — export data for fine-tuning, pipe status to CI, webhook to Slack
+
+---
+
+## Changelog
+
+### v0.4.0
+- `owlscale init` redesigned: auto-detects tools, suggests roster, optional terminal launch (60s to ready)
+- `owlscale detect`: scan for Claude Code, Copilot CLI, Codex, Cursor, VSCode, Ghostty, iTerm2, tmux
+- `owlscale launch`: open Ghostty / iTerm2 / tmux / Terminal windows for registered agents
+- `owlscale demo`: self-contained onboarding walkthrough in temp directory (no side effects)
+- `Agent` model extended with `tool`, `delivery`, `launch` fields (roster v2, backward-compatible)
+- Ghostty adapter: fix `\n` → Enter bug in shell driving
+
+### v0.3.0
+- Background daemon (`owlscale daemon`) for automatic task monitoring and shell driving
+- Ghostty AppleScript adapter
+- `owlscale history` — full task event timeline
+
+### v0.2.0
+- Agent identity system (`owlscale whoami`, per-agent context files)
+- `owlscale route` — roster-based agent suggestion
+
+### v0.1.0
+- Core protocol: pack / dispatch / claim / return / accept / reject
+- State machine, roster, log, validate, fmt, export
 
 ---
 
