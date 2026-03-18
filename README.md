@@ -35,6 +35,11 @@ owlscale demo
 
 `owlscale init` detects Claude Code, Copilot CLI, Codex, Cursor, and VSCode, suggests a roster, and optionally opens terminal windows for each agent — all in under 60 seconds.
 
+```bash
+# Monitor from your phone — LAN-accessible PWA, installable on iPhone home screen
+owlscale serve          # → http://<your-lan-ip>:7331
+```
+
 ---
 
 ## Full workflow
@@ -159,6 +164,11 @@ owlscale watch                         Watch for status changes
 ---
 
 ## Changelog
+
+### v0.5.0
+- `owlscale serve`: mobile dashboard — LAN-accessible PWA (add to iPhone home screen, offline shell cache)
+- Desktop client `owlscale-app`: macOS menu bar app (Tauri + Svelte), real-time file watcher, Accept/Reject with one click, macOS notifications, tray icon badge
+- Skeleton loading, polished empty state, Accept/Reject micro-animations, agent activity indicator in desktop UI
 
 ### v0.4.0
 - `owlscale init` redesigned: auto-detects tools, suggests roster, optional terminal launch (60s to ready)

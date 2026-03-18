@@ -1,0 +1,110 @@
+:root {
+  color-scheme: dark;
+  --panel-width: 320px;
+  --radius-panel: 10px;
+  --bg-primary: #1c1c1e;
+  --bg-secondary: #2c2c2e;
+  --bg-tertiary: #3a3a3c;
+  --border-color: #3a3a3c;
+  --text-primary: #ffffff;
+  --text-secondary: #8e8e93;
+  --accent-purple: #7c3aed;
+  --accent-green: #30d158;
+  --accent-orange: #ff9f0a;
+  --accent-red: #ff453a;
+  --accent-blue: #0a84ff;
+  --accent-yellow: #ffd60a;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: var(--panel-width);
+  min-width: var(--panel-width);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-x: hidden;
+}
+
+body {
+  min-height: 100vh;
+}
+
+body,
+button {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 1px;
+}
+
+#app {
+  width: var(--panel-width);
+}
+
+/* ── Animation utilities ──────────────────────────────────────────────────── */
+
+.skeleton-block {
+  background: var(--bg-tertiary);
+  border-radius: 10px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes skeleton-pulse {
+    0%, 100% { opacity: .4; }
+    50% { opacity: .8; }
+  }
+
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  @keyframes dot-pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.35); }
+  }
+
+  @keyframes badge-pop {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.25); }
+    100% { transform: scale(1); }
+  }
+
+  .skeleton {
+    animation: skeleton-pulse 1.4s ease-in-out infinite;
+  }
+
+  .slide-in {
+    animation: slide-in 200ms ease both;
+  }
+
+  .dot-active {
+    animation: dot-pulse 2s ease-in-out infinite;
+  }
+
+  .badge-pop-anim {
+    animation: badge-pop 250ms ease both;
+  }
+}

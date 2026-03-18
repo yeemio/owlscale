@@ -1,0 +1,50 @@
+{
+  "productName": "owlscale",
+  "version": "0.1.0",
+  "identifier": "com.owlscale.desktop",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "owlscale",
+        "width": 900,
+        "height": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Multi-agent AI coordination dashboard",
+    "copyright": "Copyright © 2026 owlscale contributors",
+    "macOS": {
+      "signingIdentity": null
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": ".*"
+    }
+  }
+}

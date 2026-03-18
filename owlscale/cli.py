@@ -193,10 +193,9 @@ def main():
     watch_parser.set_defaults(func=cmd_watch)
 
     # serve
-    serve_parser = subparsers.add_parser("serve", help="Run lightweight HTTP task delivery service")
-    serve_parser.add_argument("--agent", required=True, help="Agent ID to serve for")
-    serve_parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
-    serve_parser.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765)")
+    serve_parser = subparsers.add_parser("serve", help="Run mobile dashboard server (LAN-accessible)")
+    serve_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0 — LAN)")
+    serve_parser.add_argument("--port", type=int, default=7331, help="Bind port (default: 7331)")
     serve_parser.set_defaults(func=cmd_serve)
 
     # review
@@ -1079,11 +1078,11 @@ def cmd_watch(args):
 
 
 def cmd_serve(args):
-    """Run the lightweight HTTP task delivery service."""
-    from owlscale.serve import serve_agent
+    """Run the mobile dashboard HTTP server."""
+    from owlscale.serve import run_server
 
     owlscale_dir = get_workspace_root()
-    serve_agent(owlscale_dir, args.agent, host=args.host, port=args.port)
+    run_server(args.host, args.port, owlscale_dir)
 
 
 def cmd_review(args):
