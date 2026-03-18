@@ -10,3 +10,5 @@ venv/
 *.egg
 .DS_Store
 .owlscale/
+node_modules/
+owlscale-app/src-tauri/target/

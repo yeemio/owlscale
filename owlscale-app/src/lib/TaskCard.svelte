@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
+  import { slide } from 'svelte/transition'
   import type { TaskInfo } from '../types'
 
   export let task: TaskInfo
@@ -7,6 +8,7 @@
   let accepting = false
   let rejecting = false
   let flashAccept = false
+  let expanded = false
 
   const badgeConfig: Record<
     TaskInfo['status'],
@@ -21,6 +23,11 @@
   }
 
   $: badge = badgeConfig[task.status]
+
+  function handleCardClick(e: MouseEvent) {
+    if ((e.target as Element).closest('.task-actions')) return
+    expanded = !expanded
+  }
 
   const handleAccept = async () => {
     accepting = true
@@ -47,11 +54,15 @@
   }
 </script>
 
+<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+<!-- svelte-ignore a11y-click-events-have-key-events -->
 <article
   class="task-card slide-in"
   class:flash-accept={flashAccept}
   title={task.goal ?? task.id}
+  on:click={handleCardClick}
 >
+  <div class="expand-caret" class:open={expanded} aria-hidden="true">›</div>
   <div class="task-row">
     <span
       class="status-badge"
@@ -90,6 +101,16 @@
       </button>
     </div>
   {/if}
+
+  {#if expanded}
+    <div class="expand-detail" transition:slide={{ duration: 200 }}>
+      <div class="full-goal">{task.goal ?? task.id}</div>
+      <div class="meta-row">
+        <span class="assignee-chip">{task.assignee ?? 'unassigned'}</span>
+        <span class="task-id-full">{task.id}</span>
+      </div>
+    </div>
+  {/if}
 </article>
 
 <style>
@@ -100,6 +121,8 @@
     min-height: 52px;
     padding: 8px 12px;
     transition: background-color 0.3s ease;
+    position: relative;
+    cursor: pointer;
   }
 
   .task-card:hover {
@@ -205,5 +228,58 @@
     background: rgba(255, 69, 58, 0.12);
     border-color: #e53e34;
     color: #ff6a61;
+  }
+
+  .expand-caret {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    transition: transform 200ms ease;
+    pointer-events: none;
+  }
+
+  .expand-caret.open { transform: rotate(90deg); }
+
+  .expand-detail {
+    padding-top: 6px;
+    border-top: 1px solid var(--border-color);
+    margin-top: 4px;
+  }
+
+  .full-goal {
+    font-size: 12px;
+    color: var(--text-primary);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+
+  .meta-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+  }
+
+  .assignee-chip {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 10px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  .task-id-full {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 10px;
+    color: #636366;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 </style>

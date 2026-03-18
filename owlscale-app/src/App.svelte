@@ -9,6 +9,15 @@
   let state: WorkspaceState | null = null
   let loading = true
   let unlisten: (() => void) | null = null
+  let statusPanel: StatusPanel
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (!state?.dir) return
+    if (e.metaKey && e.key === 'a') { e.preventDefault(); statusPanel?.acceptFirst() }
+    if (e.metaKey && e.key === 'r') { e.preventDefault(); statusPanel?.rejectFirst() }
+    if (e.metaKey && e.key === ',') { e.preventDefault(); statusPanel?.openSettings() }
+    if (e.key === 'Escape') { statusPanel?.closeSettings() }
+  }
 
   onMount(async () => {
     try {
@@ -25,6 +34,8 @@
   onDestroy(() => unlisten?.())
 </script>
 
+<svelte:window on:keydown={handleKeydown} />
+
 <main class="app-shell">
   {#if loading}
     <div class="skeleton-shell">
@@ -40,7 +51,7 @@
   {:else if !state?.dir}
     <NoWorkspace />
   {:else}
-    <StatusPanel {state} />
+    <StatusPanel bind:this={statusPanel} {state} />
   {/if}
 </main>
 

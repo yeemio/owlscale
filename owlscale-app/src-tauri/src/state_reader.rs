@@ -104,6 +104,17 @@ fn parse_packet_goal(packet_path: &Path) -> Option<String> {
     None
 }
 
+pub fn read_task_packet(owlscale_dir: &Path, task_id: &str) -> Result<String, String> {
+    let packet_path = owlscale_dir.join("packets").join(format!("{task_id}.md"));
+    std::fs::read_to_string(&packet_path).map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("packet not found for task '{task_id}'")
+        } else {
+            format!("read packet {task_id}: {e}")
+        }
+    })
+}
+
 /// Read `state.json` and `roster.json` from `owlscale_dir` and return a
 /// combined `WorkspaceState`. Missing files are treated as empty collections.
 pub fn read_workspace_state(owlscale_dir: &Path) -> Result<WorkspaceState, String> {
@@ -112,17 +123,14 @@ pub fn read_workspace_state(owlscale_dir: &Path) -> Result<WorkspaceState, Strin
 
     let state_path = owlscale_dir.join("state.json");
     if state_path.exists() {
-        let raw = std::fs::read_to_string(&state_path)
-            .map_err(|e| format!("read state.json: {e}"))?;
+        let raw =
+            std::fs::read_to_string(&state_path).map_err(|e| format!("read state.json: {e}"))?;
         let parsed: StateJson =
             serde_json::from_str(&raw).map_err(|e| format!("parse state.json: {e}"))?;
 
         for (task_id, entry) in parsed.tasks {
-            let goal = parse_packet_goal(
-                &owlscale_dir
-                    .join("packets")
-                    .join(format!("{task_id}.md")),
-            );
+            let goal =
+                parse_packet_goal(&owlscale_dir.join("packets").join(format!("{task_id}.md")));
             if entry.status == "returned" {
                 pending_review += 1;
             }
@@ -142,8 +150,8 @@ pub fn read_workspace_state(owlscale_dir: &Path) -> Result<WorkspaceState, Strin
 
     let roster_path = owlscale_dir.join("roster.json");
     if roster_path.exists() {
-        let raw = std::fs::read_to_string(&roster_path)
-            .map_err(|e| format!("read roster.json: {e}"))?;
+        let raw =
+            std::fs::read_to_string(&roster_path).map_err(|e| format!("read roster.json: {e}"))?;
         let parsed: RosterJson =
             serde_json::from_str(&raw).map_err(|e| format!("parse roster.json: {e}"))?;
 
@@ -264,5 +272,24 @@ Body
         let missing_path = dir.path().join("missing.md");
 
         assert_eq!(parse_packet_goal(&missing_path), None);
+    }
+
+    #[test]
+    fn read_task_packet_returns_full_markdown() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+        fs::write(ws_dir.join("packets").join("task-1.md"), "# Packet\n\nBody").unwrap();
+
+        let packet = read_task_packet(&ws_dir, "task-1").unwrap();
+        assert_eq!(packet, "# Packet\n\nBody");
+    }
+
+    #[test]
+    fn read_task_packet_errors_for_missing_packet() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+
+        let err = read_task_packet(&ws_dir, "missing").unwrap_err();
+        assert!(err.contains("packet not found"));
     }
 }

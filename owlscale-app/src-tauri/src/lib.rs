@@ -100,6 +100,62 @@ pub(crate) fn update_tray_icon(app: &tauri::AppHandle, pending_review: usize) {
     }
 }
 
+/// Rebuild the tray menu dynamically to show pending review count and first 3 returned tasks.
+pub(crate) fn rebuild_tray_menu(app: &tauri::AppHandle, state: &WorkspaceState) {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let title = if state.pending_review > 0 {
+        format!("owlscale \u{00b7} {} to review", state.pending_review)
+    } else {
+        "owlscale \u{00b7} idle".to_string()
+    };
+
+    let title_item = match MenuItem::<tauri::Wry>::with_id(app, "title", &title, false, None::<&str>) {
+        Ok(v) => v, Err(_) => return,
+    };
+    let sep1 = match PredefinedMenuItem::<tauri::Wry>::separator(app) {
+        Ok(v) => v, Err(_) => return,
+    };
+    let show_item = match MenuItem::<tauri::Wry>::with_id(app, "show", "Show Window", true, None::<&str>) {
+        Ok(v) => v, Err(_) => return,
+    };
+    let quit_item = match MenuItem::<tauri::Wry>::with_id(app, "quit", "Quit", true, None::<&str>) {
+        Ok(v) => v, Err(_) => return,
+    };
+
+    let returned: Vec<_> = state.tasks.iter()
+        .filter(|t| t.status == "returned")
+        .take(3)
+        .collect();
+
+    let task_items: Vec<MenuItem<tauri::Wry>> = returned.iter()
+        .filter_map(|t| {
+            let label = format!("\u{21a9} {}", &t.id);
+            MenuItem::<tauri::Wry>::with_id(app, format!("task-{}", t.id), label, true, None::<&str>).ok()
+        })
+        .collect();
+
+    let sep2 = match PredefinedMenuItem::<tauri::Wry>::separator(app) {
+        Ok(v) => v, Err(_) => return,
+    };
+
+    let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&title_item, &sep1];
+    for ti in &task_items {
+        items.push(ti);
+    }
+    if !task_items.is_empty() {
+        items.push(&sep2);
+    }
+    items.push(&show_item);
+    items.push(&quit_item);
+
+    if let Ok(menu) = Menu::<tauri::Wry>::with_items(app, &items) {
+        if let Some(tray) = app.tray_by_id("main") {
+            let _ = tray.set_menu(Some(menu));
+        }
+    }
+}
+
 // ─── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -121,6 +177,17 @@ fn get_workspace_state(
 fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppConfig, String> {
     let config = state.config.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
+}
+
+#[tauri::command]
+fn get_task_packet(task_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let owlscale_dir = state
+        .owlscale_dir
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "No workspace loaded — call set_workspace_dir first".to_string())?;
+    state_reader::read_task_packet(&owlscale_dir, &task_id)
 }
 
 #[tauri::command]
@@ -201,6 +268,7 @@ fn set_workspace_dir(
     save_config(&config_to_save);
 
     update_tray_icon(&app, ws.pending_review);
+    rebuild_tray_menu(&app, &ws);
     app.emit("owlscale://state-changed", &ws)
         .map_err(|e| e.to_string())?;
     let cancel = watcher::start_watcher(owlscale_dir, app, Arc::clone(&state.workspace_state));
@@ -326,8 +394,8 @@ pub fn run() {
 
             // ── System tray (id = "main" so update_tray_icon can find it) ──
             let icon_bytes = include_bytes!("../icons/tray-idle.png");
-            let icon = Image::from_bytes(icon_bytes)
-                .map_err(|e| format!("tray icon error: {e}"))?;
+            let icon =
+                Image::from_bytes(icon_bytes).map_err(|e| format!("tray icon error: {e}"))?;
 
             let show_item =
                 tauri::menu::MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -349,15 +417,31 @@ pub fn run() {
                     "quit" => {
                         app.exit(0);
                     }
+                    id if id.starts_with("task-") => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
+                        }
+                        let task_id = id.strip_prefix("task-").unwrap_or("").to_string();
+                        let _ = app.emit("owlscale://focus-task", task_id);
+                    }
                     _ => {}
                 })
                 .build(app)?;
+
+            // Rebuild tray menu with initial workspace state
+            if let Ok(guard) = state.workspace_state.lock() {
+                if let Some(ws) = guard.as_ref() {
+                    rebuild_tray_menu(app.handle(), ws);
+                }
+            }
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_workspace_state,
             get_settings,
+            get_task_packet,
             accept_task,
             reject_task,
             set_workspace_dir,

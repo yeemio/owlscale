@@ -33,8 +33,21 @@
     showSettings = !showSettings
   }
 
-  const closeSettings = (): void => {
-    showSettings = false
+  export function openSettings(): void { showSettings = true }
+  export function closeSettings(): void { showSettings = false }
+
+  export function acceptFirst(): void {
+    const first = [...state.tasks]
+      .filter(t => t.status === 'returned')
+      .sort((a, b) => a.id.localeCompare(b.id))[0]
+    if (first) invoke('accept_task', { taskId: first.id }).catch(console.error)
+  }
+
+  export function rejectFirst(): void {
+    const first = [...state.tasks]
+      .filter(t => t.status === 'returned')
+      .sort((a, b) => a.id.localeCompare(b.id))[0]
+    if (first) invoke('reject_task', { taskId: first.id, reason: null }).catch(console.error)
   }
 
   $: sortedTasks = sortTasks(state.tasks)
