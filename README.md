@@ -10,13 +10,36 @@ No server. No database. Just files and a CLI.
 
 ## Install
 
+### CLI (Python)
+
 ```bash
-pip install owlscale
-# or with pipx
-pipx install owlscale
+pip install git+https://github.com/yeemio/owlscale.git
+```
+
+Or clone and install locally:
+
+```bash
+git clone https://github.com/yeemio/owlscale.git
+cd owlscale
+pip install -e .
 ```
 
 Requires Python 3.10+.
+
+### Desktop app (macOS)
+
+The menu bar companion app provides one-click Accept/Reject, real-time notifications, and keyboard shortcuts.
+
+```bash
+# Build from source (requires Rust toolchain + Node.js)
+cd owlscale-app
+npm install
+cd src-tauri && cargo tauri build
+```
+
+The built `.dmg` will be in `owlscale-app/src-tauri/target/release/bundle/dmg/`.
+
+> Pre-built binaries coming soon via GitHub Releases.
 
 ---
 
@@ -37,7 +60,7 @@ owlscale demo
 
 ```bash
 # Monitor from your phone — LAN-accessible PWA, installable on iPhone home screen
-owlscale serve          # → http://<your-lan-ip>:7331
+owlscale serve          # → http://<your-lan-ip>:7331  (SSE real-time updates)
 ```
 
 ---
@@ -131,7 +154,7 @@ owlscale return <id>                   Submit return packet
 owlscale accept <id>                   Accept result
 owlscale reject <id> [--reason]        Reject result
 owlscale status                        Show all task states
-owlscale log [--task <id>]             Show operation log
+owlscale log [--task <id>] [--since 2h] Show operation log
 
 owlscale validate <id>                 Validate a Context Packet
 owlscale fmt <id>                      Format packet frontmatter
@@ -140,6 +163,7 @@ owlscale diff <id-a> <id-b>            Diff two packets
 owlscale stats                         Workspace statistics
 owlscale history <id>                  Full task event timeline
 owlscale prune [--days N] [--dry-run]  Archive old completed tasks
+owlscale purge [--older-than 30d] [--apply]  Remove old packets + trim log
 
 owlscale route <id>                    Suggest best agent (roster-based)
 owlscale export [--output file.jsonl]  Export training data
