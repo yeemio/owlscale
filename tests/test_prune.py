@@ -17,7 +17,7 @@ from owlscale.core import (
     return_task, accept_task, reject_task, load_state, save_state,
 )
 from owlscale.models import TaskStatus
-from owlscale.prune import prune_workspace, PruneResult
+from owlscale.prune import prune_workspace, PruneResult, purge_workspace
 
 
 def _make_completed_task(workspace, task_id, agent_id, status=TaskStatus.accepted, days_ago=60):
@@ -137,6 +137,11 @@ class TestPruneWorkspace:
         result = prune_workspace(workspace, days=30)
         assert result.archived == []
 
+    def test_purge_alias_matches_prune_behavior(self, workspace):
+        _make_completed_task(workspace, "purge-me", "bot", days_ago=60)
+        result = purge_workspace(workspace, days=30)
+        assert "purge-me" in result.archived
+
 
 class TestPruneCLI:
     def test_dry_run_exits_zero(self, tmp_path):
@@ -191,3 +196,15 @@ class TestPruneCLI:
         )
         assert r.returncode == 0
         assert not (ws / "packets" / "recent.md").exists()
+
+    def test_purge_alias_archives_without_prompt(self, tmp_path):
+        ws = init_project(tmp_path)
+        add_agent(ws, "bot", "Bot", "executor")
+        _make_completed_task(ws, "old-purge", "bot", days_ago=90)
+        r = subprocess.run(
+            [sys.executable, "-m", "owlscale", "purge", "--apply"],
+            capture_output=True, env=CLI_ENV, text=True, cwd=str(tmp_path),
+        )
+        assert r.returncode == 0
+        assert "APPLY" in r.stdout
+        assert not (ws / "packets" / "old-purge.md").exists()

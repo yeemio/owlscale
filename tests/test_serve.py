@@ -1,10 +1,11 @@
 """Tests for owlscale serve helpers."""
 
 import json
+import queue
 import threading
 import urllib.request
 import urllib.error
-from http.server import HTTPServer
+from http.server import HTTPServer, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -181,6 +182,54 @@ class TestDashboardHandler:
         task = next(t for t in data["tasks"] if t["id"] == "task-alpha")
         assert task["status"] == "accepted"
 
+    def test_api_events_streams_state_updates(self, dashboard_workspace):
+        handler = make_handler(dashboard_workspace, 0)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        host, port = server.server_address
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        events: "queue.Queue[dict]" = queue.Queue()
+
+        def _reader():
+            seen = 0
+            with urllib.request.urlopen(f"http://{host}:{port}/api/events", timeout=5) as response:
+                assert "text/event-stream" in response.headers.get("Content-Type", "")
+                while True:
+                    line = response.readline().decode("utf-8").strip()
+                    if line.startswith("data: "):
+                        events.put(json.loads(line[6:]))
+                        seen += 1
+                        if seen >= 2:
+                            break
+
+        reader = threading.Thread(target=_reader, daemon=True)
+        try:
+            thread.start()
+            reader.start()
+
+            initial = events.get(timeout=5)
+            assert initial["pending_review"] == 1
+
+            code, body = _http_post(f"http://{host}:{port}/api/accept", {"task_id": "task-alpha"})
+            assert code == 200
+            assert json.loads(body) == {"ok": True}
+
+            updated = events.get(timeout=5)
+            task = next(t for t in updated["tasks"] if t["id"] == "task-alpha")
+            assert updated["pending_review"] == 0
+            assert task["status"] == "accepted"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+            reader.join(timeout=2)
+
+    def test_html_contains_pwa_and_refresh_button(self, live_server):
+        host, port, _ = live_server
+        with urllib.request.urlopen(f"http://{host}:{port}/", timeout=5) as r:
+            body = r.read()
+        assert b'rel="manifest"' in body
+        assert b'refresh-btn' in body
+
     def test_api_reject_returns_400_for_non_returned_task(self, dashboard_workspace):
         pack_task(dashboard_workspace, "task-beta", "Another task")
         dispatch_task(dashboard_workspace, "task-beta", "bot-a")
@@ -261,4 +310,3 @@ class TestPWARoutes:
             assert r.status == 200
             body = r.read()
         assert b"owlscale-v1" in body
-

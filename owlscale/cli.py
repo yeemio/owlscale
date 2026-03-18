@@ -159,6 +159,7 @@ def main():
     # log
     log_parser = subparsers.add_parser("log", help="Show operation log")
     log_parser.add_argument("--task", help="Filter by task ID")
+    log_parser.add_argument("--since", metavar="DURATION", help="Show events from last N time units (e.g. 30m, 2h, 7d)")
     log_parser.add_argument("-n", "--limit", type=int, help="Limit number of entries")
     log_parser.set_defaults(func=cmd_log)
 
@@ -197,6 +198,14 @@ def main():
     serve_parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0 — LAN)")
     serve_parser.add_argument("--port", type=int, default=7331, help="Bind port (default: 7331)")
     serve_parser.set_defaults(func=cmd_serve)
+
+    # purge
+    purge_parser = subparsers.add_parser("purge", help="Remove old accepted/rejected packets and trim log")
+    purge_parser.add_argument("--older-than", default="30d", metavar="DURATION",
+        help="Remove items older than this (default: 30d). Format: Nm, Nh, Nd")
+    purge_parser.add_argument("--apply", action="store_true",
+        help="Actually delete files (default: dry run)")
+    purge_parser.set_defaults(func=cmd_purge)
 
     # review
     review_parser = subparsers.add_parser("review", help="Review a Return Packet against Expected Output")
@@ -995,6 +1004,16 @@ def cmd_log(args):
     owlscale_dir = get_workspace_root()
     entries = get_log(owlscale_dir, task_id=args.task if hasattr(args, 'task') else None, limit=args.limit if hasattr(args, 'limit') else None)
 
+    since_str = getattr(args, 'since', None)
+    if since_str:
+        from owlscale.history import parse_duration, filter_log_entries_since
+        try:
+            delta = parse_duration(since_str)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        entries = filter_log_entries_since(entries, delta)
+
     if not entries:
         print("No log entries.")
         return
@@ -1083,6 +1102,31 @@ def cmd_serve(args):
 
     owlscale_dir = get_workspace_root()
     run_server(args.host, args.port, owlscale_dir)
+
+
+def cmd_purge(args):
+    """Remove old accepted/rejected packets and trim log entries."""
+    from owlscale.history import parse_duration
+    from owlscale.prune import purge_workspace
+
+    owlscale_dir = get_workspace_root()
+    try:
+        delta = parse_duration(args.older_than)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    days = max(1, int(delta.total_seconds() / 86400))
+    dry_run = not args.apply
+    result = purge_workspace(owlscale_dir, days=days, dry_run=dry_run)
+    mode = "DRY RUN" if dry_run else "APPLY"
+    print(f"owlscale purge — {mode} — older than {args.older_than}")
+    print(f"  packets: {len(result.archived)} to remove"
+          + (" → deleted" if args.apply else ""))
+    for tid in result.archived:
+        print(f"    {tid}")
+    if not args.apply and result.archived:
+        print("\nRe-run with --apply to execute.")
 
 
 def cmd_review(args):

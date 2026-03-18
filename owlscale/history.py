@@ -4,8 +4,51 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional
+
+_DURATION_RE = re.compile(r'^(\d+)(m|h|d)$')
+
+
+def parse_duration(s: str) -> timedelta:
+    """Parse a duration string like '30m', '2h', '7d' into a timedelta."""
+    m = _DURATION_RE.match(s.strip())
+    if not m:
+        raise ValueError(f"invalid duration '{s}' — use e.g. 30m, 2h, 7d")
+    value, unit = int(m.group(1)), m.group(2)
+    if unit == 'm':
+        return timedelta(minutes=value)
+    if unit == 'h':
+        return timedelta(hours=value)
+    return timedelta(days=value)
+
+
+def _parse_timestamp(timestamp: str) -> Optional[datetime]:
+    """Parse an ISO 8601 timestamp into a UTC-aware datetime."""
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def filter_log_entries_since(entries: List[str], since: timedelta) -> List[str]:
+    """Return only log entries newer than the given relative duration."""
+    cutoff = datetime.now(timezone.utc) - since
+    filtered: List[str] = []
+    for entry in entries:
+        parsed = _parse_log_line(entry)
+        if not parsed:
+            continue
+        ts, _, _, _ = parsed
+        dt = _parse_timestamp(ts)
+        if dt is None or dt < cutoff:
+            continue
+        filtered.append(entry)
+    return filtered
 
 
 _LOG_RE = re.compile(

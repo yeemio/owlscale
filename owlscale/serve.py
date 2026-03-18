@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import queue
 import socket
 import struct
 import threading
+import time
 import zlib as _zlib
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -269,20 +271,20 @@ body { background: #1c1c1e; color: #fff; font-family: -apple-system, BlinkMacSys
 .section-header { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 8px; }
 .section-label { color: #8e8e93; font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; }
 .review-badge { background: #ff9f0a; color: #1c1c1e; font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
-.agent-row { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; min-height: 48px; border-bottom: 1px solid #2c2c2e; }
+.agent-row { display: flex; align-items: center; justify-content: space-between; padding: 0 16px; min-height: 52px; border-bottom: 1px solid #2c2c2e; }
 .agent-left { display: flex; align-items: center; gap: 10px; }
 .agent-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .agent-name { font-size: 15px; color: #fff; }
 .agent-role { font-size: 13px; color: #8e8e93; }
 .task-list { padding: 0 16px 8px; display: flex; flex-direction: column; gap: 8px; }
-.task-card { background: #2c2c2e; border-radius: 10px; padding: 12px; }
+.task-card { background: #2c2c2e; border-radius: 10px; padding: 12px; overflow: hidden; max-height: 90px; transition: max-height 250ms ease; cursor: pointer; }
 .task-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .task-badge { font-size: 10px; font-weight: 700; letter-spacing: 0.25px; padding: 3px 8px; border-radius: 999px; }
 .task-assignee { font-size: 12px; color: #8e8e93; }
 .task-goal { font-size: 12px; color: #fff; margin-bottom: 4px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.task-id-small { font-size: 10px; color: #636366; margin-bottom: 8px; }
+.task-id-small { font-size: 10px; color: #636366; margin-bottom: 8px; display: none; }
 .task-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.btn { height: 44px; border-radius: 8px; font-size: 15px; font-weight: 600; border: none; cursor: pointer; transition: opacity 120ms ease; }
+.btn { height: 52px; border-radius: 8px; font-size: 16px; font-weight: 600; border: none; cursor: pointer; transition: opacity 120ms ease; }
 .btn:disabled { opacity: 0.5; cursor: default; }
 .btn-accept { background: #30d158; color: #1c1c1e; }
 .btn-reject { background: transparent; border: 1px solid #ff453a; color: #ff453a; }
@@ -294,6 +296,14 @@ body { background: #1c1c1e; color: #fff; font-family: -apple-system, BlinkMacSys
 .badge-rejected { background: #3a3a3c; color: #ff453a; }
 .badge-draft    { background: #3a3a3c; color: #8e8e93; }
 .empty-hint { color: #636366; font-size: 13px; padding: 8px 16px; }
+.task-card[data-expanded="true"] { max-height: 400px; }
+.task-card[data-expanded="true"] .task-goal { -webkit-line-clamp: unset; white-space: normal; }
+.task-card[data-expanded="true"] .task-id-small { display: block; }
+.task-card[data-status="accepted"] { opacity: 0.55; }
+.task-card[data-status="rejected"] { opacity: 0.4; }
+.refresh-btn { width:32px; height:32px; background:none; border:none; color:#636366; font-size:20px; cursor:pointer; border-radius:6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinning { animation: spin 600ms linear; }
 </style>
 </head>
 <body>
@@ -301,6 +311,7 @@ body { background: #1c1c1e; color: #fff; font-family: -apple-system, BlinkMacSys
   <header class="header">
     <div class="logo">&#11041; owlscale</div>
     <div class="server-host" id="server-host"></div>
+    <button id="refresh-btn" class="refresh-btn" onclick="manualRefresh()" aria-label="Refresh">&#8635;</button>
   </header>
   <div id="app"><div class="empty-hint">Loading&#8230;</div></div>
   <footer class="footer">owlscale serve &middot; :{{PORT}}</footer>
@@ -316,6 +327,7 @@ const BADGE_MAP = {
   draft:       { cls: 'badge-draft',    label: '\\u25cb DRAFT' },
 };
 const STATUS_ORDER = { returned:0, dispatched:1, in_progress:2, draft:3, accepted:4, rejected:5 };
+let _expandedTaskId = null;
 
 function esc(s) {
   return String(s)
@@ -360,10 +372,12 @@ function renderState(state) {
     const actionsHtml = t.status === 'returned'
       ? `<div class="task-actions"><button class="btn btn-accept" onclick="acceptTask('${esc(t.id)}', this)">Accept</button><button class="btn btn-reject" onclick="rejectTask('${esc(t.id)}', this)">Reject</button></div>`
       : '';
-    html += `<div class="task-card"><div class="task-top"><span class="task-badge ${badge.cls}">${badge.label}</span><span class="task-assignee">${esc(assignee)}</span></div>${goalHtml}${actionsHtml}</div>`;
+    const isExp = t.id === _expandedTaskId;
+    html += `<div class="task-card" data-expanded="${isExp ? 'true' : 'false'}" data-task-id="${esc(t.id)}" data-status="${esc(t.status)}"><div class="task-top"><span class="task-badge ${badge.cls}">${badge.label}</span><span class="task-assignee">${esc(assignee)}</span></div>${goalHtml}${actionsHtml}</div>`;
   }
   html += '</div>';
   document.getElementById('app').innerHTML = html;
+  document.querySelector('.footer').textContent = 'owlscale serve \u00b7 :{{PORT}} \u00b7 ' + new Date().toLocaleTimeString();
 }
 
 async function refresh() {
@@ -393,6 +407,19 @@ function rejectTask(taskId, btn) { _action('/api/reject', { task_id: taskId, rea
 setInterval(refresh, 3000);
 refresh();
 if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js'); }
+document.getElementById('app').addEventListener('click', function(e) {
+  const card = e.target.closest('.task-card');
+  if (!card || e.target.closest('.btn')) return;
+  const taskId = card.dataset.taskId;
+  const isOpen = card.dataset.expanded === 'true';
+  document.querySelectorAll('.task-card[data-expanded="true"]').forEach(c => { c.dataset.expanded = 'false'; });
+  if (!isOpen) { card.dataset.expanded = 'true'; }
+  _expandedTaskId = isOpen ? null : taskId;
+});
+function manualRefresh() {
+  document.getElementById('refresh-btn').classList.add('spinning');
+  refresh().finally(() => { setTimeout(() => document.getElementById('refresh-btn').classList.remove('spinning'), 600); });
+}
 </script>
 </body>
 </html>"""
@@ -454,12 +481,96 @@ def _build_state_json(owlscale_dir: Path) -> dict:
     return {"tasks": tasks, "agents": agents, "pending_review": pending_review}
 
 
+class _WatchThread:
+    """Poll workspace state and fan out dashboard updates to SSE subscribers."""
+
+    def __init__(self, owlscale_dir: Path, interval: float = 0.5):
+        self._owlscale_dir = owlscale_dir
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._subscribers: set[queue.Queue[dict]] = set()
+        self._thread: Optional[threading.Thread] = None
+        self._last_signature = self._workspace_signature()
+
+    def subscribe(self) -> queue.Queue[dict]:
+        subscriber: queue.Queue[dict] = queue.Queue()
+        with self._lock:
+            self._subscribers.add(subscriber)
+            if self._thread is None or not self._thread.is_alive():
+                self._last_signature = self._workspace_signature()
+                self._thread = threading.Thread(target=self._run, daemon=True)
+                self._thread.start()
+        return subscriber
+
+    def unsubscribe(self, subscriber: queue.Queue[dict]) -> None:
+        with self._lock:
+            self._subscribers.discard(subscriber)
+
+    def _run(self) -> None:
+        idle_cycles = 0
+        while True:
+            time.sleep(self._interval)
+            with self._lock:
+                has_subscribers = bool(self._subscribers)
+            if not has_subscribers:
+                idle_cycles += 1
+                if idle_cycles >= 4:
+                    with self._lock:
+                        if not self._subscribers:
+                            self._thread = None
+                            return
+                    idle_cycles = 0
+                continue
+
+            idle_cycles = 0
+            signature = self._workspace_signature()
+            if signature == self._last_signature:
+                continue
+            self._last_signature = signature
+            self._publish(_build_state_json(self._owlscale_dir))
+
+    def _publish(self, payload: dict) -> None:
+        with self._lock:
+            subscribers = list(self._subscribers)
+        for subscriber in subscribers:
+            subscriber.put(payload)
+
+    def _workspace_signature(self) -> tuple:
+        return (
+            self._file_signature(self._owlscale_dir / "state.json"),
+            self._file_signature(self._owlscale_dir / "roster.json"),
+            self._directory_signature(self._owlscale_dir / "packets"),
+            self._directory_signature(self._owlscale_dir / "returns"),
+        )
+
+    @staticmethod
+    def _file_signature(path: Path) -> tuple | None:
+        if not path.exists():
+            return None
+        stat = path.stat()
+        return (path.name, stat.st_mtime_ns, stat.st_size)
+
+    @staticmethod
+    def _directory_signature(path: Path) -> tuple:
+        if not path.exists():
+            return ()
+        signatures = []
+        for child in sorted(path.glob("*.md")):
+            if not child.is_file():
+                continue
+            stat = child.stat()
+            signatures.append((child.name, stat.st_mtime_ns, stat.st_size))
+        return tuple(signatures)
+
+
 def make_handler(owlscale_dir: Path, port: int):
     """Return a BaseHTTPRequestHandler class for the mobile dashboard."""
 
     class OwlscaleDashboardHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
         _owlscale_dir = owlscale_dir
         _port = port
+        _watch_thread = _WatchThread(owlscale_dir)
 
         def do_GET(self):
             path = urlparse(self.path).path
@@ -467,6 +578,8 @@ def make_handler(owlscale_dir: Path, port: int):
                 self._serve_html()
             elif path == "/api/state":
                 self._serve_state()
+            elif path == "/api/events":
+                self._serve_events()
             elif path == "/manifest.json":
                 self._write_response(200, "application/manifest+json", _MANIFEST_JSON)
             elif path == "/sw.js":
@@ -499,6 +612,28 @@ def make_handler(owlscale_dir: Path, port: int):
             except Exception as exc:
                 self._write_response(500, "application/json", json.dumps({"error": str(exc)}).encode())
 
+        def _serve_events(self):
+            subscriber = self._watch_thread.subscribe()
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Connection", "keep-alive")
+                self.end_headers()
+                self._write_sse(_build_state_json(self._owlscale_dir))
+                while True:
+                    try:
+                        payload = subscriber.get(timeout=15)
+                    except queue.Empty:
+                        self.wfile.write(b": keep-alive\n\n")
+                        self.wfile.flush()
+                        continue
+                    self._write_sse(payload)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+            finally:
+                self._watch_thread.unsubscribe(subscriber)
+
         def _handle_action(self, action: str):
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -528,6 +663,11 @@ def make_handler(owlscale_dir: Path, port: int):
             self.end_headers()
             self.wfile.write(body)
 
+        def _write_sse(self, payload: dict):
+            body = f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+            self.wfile.write(body)
+            self.wfile.flush()
+
         def log_message(self, fmt, *args):  # suppress default stderr log
             pass
 
@@ -548,4 +688,3 @@ def run_server(host: str, port: int, owlscale_dir: Path) -> None:
         pass
     finally:
         server.server_close()
-

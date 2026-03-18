@@ -165,6 +165,13 @@ owlscale watch                         Watch for status changes
 
 ## Changelog
 
+### v0.6.0
+- `owlscale log --since 2h --task TASK_ID`: filter log by time window and/or task ID
+- `owlscale purge --older-than 30d --apply`: clean up old accepted/rejected packets and trim log entries (dry-run by default)
+- Server-Sent Events (`/api/events`): instant dashboard updates replacing 3s polling
+- Mobile dashboard v2: larger touch targets, tap-to-expand cards, refresh animation
+- Desktop: click-to-expand task detail, keyboard shortcuts (Cmd+A/R accept/reject, Cmd+, settings), dynamic tray menu with pending count, packet reader command
+
 ### v0.5.0
 - `owlscale serve`: mobile dashboard — LAN-accessible PWA (add to iPhone home screen, offline shell cache)
 - Desktop client `owlscale-app`: macOS menu bar app (Tauri + Svelte), real-time file watcher, Accept/Reject with one click, macOS notifications, tray icon badge

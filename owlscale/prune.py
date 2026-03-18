@@ -85,3 +85,8 @@ def prune_workspace(owlscale_dir: Path, days: int = 30, dry_run: bool = False) -
         save_state(owlscale_dir, state)
 
     return result
+
+
+def purge_workspace(owlscale_dir: Path, days: int = 30, dry_run: bool = False) -> PruneResult:
+    """Alias for prune_workspace used by the user-facing purge command."""
+    return prune_workspace(owlscale_dir, days=days, dry_run=dry_run)
