@@ -17,11 +17,12 @@
   <div class="empty-icon" aria-hidden="true">⬡</div>
   <div class="empty-title">No workspace</div>
   <div class="empty-subtitle">
-    cd into a project and run
-    <code class="inline-cmd">owlscale init</code>
+    Open a project folder that already contains a
+    <code class="inline-cmd">.owlscale/</code>
+    workspace.
   </div>
   <button class="pick-link" type="button" on:click={pickFolder}>
-    or open a folder…
+    Open folder…
   </button>
 </div>
 
@@ -61,7 +62,7 @@
     display: inline-block;
     background: rgba(124, 58, 237, 0.18);
     color: var(--accent-purple);
-    font-family: ui-monospace, "SF Mono", monospace;
+    font-family: ui-monospace, 'SF Mono', monospace;
     font-size: 12px;
     padding: 1px 6px;
     border-radius: 4px;

@@ -1,6 +1,6 @@
 use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -10,13 +10,6 @@ use tauri_plugin_notification::NotificationExt;
 use crate::state_reader::{read_workspace_state, WorkspaceState};
 use crate::AppState;
 
-/// Spawn a background thread that watches `owlscale_dir` for changes to
-/// `state.json` or `roster.json`. On each relevant change (debounced to
-/// 500 ms):
-///   1. Re-reads the workspace state and updates `workspace_state`.
-///   2. Emits `"owlscale://state-changed"` with the new payload.
-///   3. Updates the menu-bar tray icon.
-///   4. Fires macOS notifications for newly-returned tasks.
 pub fn start_watcher(
     owlscale_dir: PathBuf,
     app_handle: tauri::AppHandle,
@@ -26,25 +19,26 @@ pub fn start_watcher(
     let cancel_clone = cancel.clone();
     std::thread::spawn(move || {
         let (tx, rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
-
         let mut watcher = match RecommendedWatcher::new(tx, Config::default()) {
-            Ok(w) => w,
-            Err(e) => {
-                eprintln!("[owlscale watcher] failed to create watcher: {e}");
+            Ok(value) => value,
+            Err(err) => {
+                eprintln!("[owlscale watcher] failed to create watcher: {err}");
                 return;
             }
         };
 
-        if let Err(e) = watcher.watch(&owlscale_dir, RecursiveMode::NonRecursive) {
+        if let Err(err) = watcher.watch(&owlscale_dir, RecursiveMode::Recursive) {
             eprintln!(
-                "[owlscale watcher] failed to watch {}: {e}",
+                "[owlscale watcher] failed to watch {}: {err}",
                 owlscale_dir.display()
             );
             return;
         }
 
-        // Allow first event immediately
         let mut last_emit = Instant::now() - Duration::from_secs(10);
+        let tasks_dir = owlscale_dir.join("tasks");
+        let returns_dir = owlscale_dir.join("returns");
+        let packets_dir = owlscale_dir.join("packets");
 
         loop {
             if cancel_clone.load(Ordering::Relaxed) {
@@ -56,18 +50,19 @@ pub fn start_watcher(
             }
             match result {
                 Ok(Ok(event)) => {
-                    let is_relevant = event.paths.iter().any(|p| {
-                        p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n == "state.json" || n == "roster.json")
-                            .unwrap_or(false)
+                    let is_relevant = event.paths.iter().any(|path| {
+                        path.starts_with(&tasks_dir)
+                            || path.starts_with(&returns_dir)
+                            || path.starts_with(&packets_dir)
+                            || matches!(
+                                file_name(path),
+                                Some("roster.json") | Some("state.json") | Some("worktrees.json")
+                            )
                     });
-
                     if !is_relevant {
                         continue;
                     }
 
-                    // Debounce: skip if last emit was < 500 ms ago
                     let now = Instant::now();
                     if now.duration_since(last_emit) < Duration::from_millis(500) {
                         continue;
@@ -79,71 +74,60 @@ pub fn start_watcher(
                             if let Ok(mut guard) = workspace_state.lock() {
                                 *guard = Some(new_state.clone());
                             }
-
-                            if let Err(e) =
+                            if let Err(err) =
                                 app_handle.emit("owlscale://state-changed", &new_state)
                             {
-                                eprintln!("[owlscale watcher] emit error: {e}");
+                                eprintln!("[owlscale watcher] emit error: {err}");
                             }
-
-                            // Update tray icon to reflect pending review count
                             crate::update_tray_icon(&app_handle, new_state.pending_review);
+                            crate::rebuild_tray_menu(&app_handle, &new_state);
 
-                            // ── Notifications ──────────────────────────────
                             if new_state.pending_review > 0 {
                                 notify_new_returned(&app_handle, &new_state);
-                            } else {
-                                // All tasks left 'returned' — clear seen set
-                                if let Some(app_state) =
-                                    app_handle.try_state::<AppState>()
-                                {
-                                    if let Ok(mut seen) =
-                                        app_state.seen_returned.lock()
-                                    {
-                                        seen.retain(|id| {
-                                            new_state
-                                                .tasks
-                                                .iter()
-                                                .any(|t| &t.id == id && t.status == "returned")
-                                        });
-                                    }
+                            } else if let Some(app_state) = app_handle.try_state::<AppState>() {
+                                if let Ok(mut seen) = app_state.seen_returned.lock() {
+                                    seen.retain(|id| {
+                                        new_state
+                                            .tasks
+                                            .iter()
+                                            .any(|task| &task.id == id && task.status == "returned")
+                                    });
                                 }
                             }
                         }
-                        Err(e) => {
-                            eprintln!("[owlscale watcher] re-read failed: {e}");
+                        Err(err) => {
+                            eprintln!("[owlscale watcher] re-read failed: {err}");
                         }
                     }
                 }
-                Ok(Err(e)) => {
-                    eprintln!("[owlscale watcher] watch error: {e}");
+                Ok(Err(err)) => {
+                    eprintln!("[owlscale watcher] watch error: {err}");
                 }
-                Err(_timeout) => {
-                    // Normal timeout — just loop and check cancel flag
-                }
+                Err(_) => {}
             }
         }
     });
     cancel
 }
 
-/// Fire one macOS notification per task that newly transitioned to `returned`.
-/// Tasks already in `seen_returned` are skipped to prevent duplicates.
+fn file_name(path: &Path) -> Option<&str> {
+    path.file_name().and_then(|value| value.to_str())
+}
+
 fn notify_new_returned(app: &tauri::AppHandle, state: &WorkspaceState) {
     let returned_ids: HashSet<String> = state
         .tasks
         .iter()
-        .filter(|t| t.status == "returned")
-        .map(|t| t.id.clone())
+        .filter(|task| task.status == "returned")
+        .map(|task| task.id.clone())
         .collect();
 
     let app_state = match app.try_state::<AppState>() {
-        Some(s) => s,
+        Some(value) => value,
         None => return,
     };
-
     let mut seen = match app_state.seen_returned.lock() {
-        Ok(g) => g,
+        Ok(value) => value,
         Err(_) => return,
     };
 
@@ -156,9 +140,5 @@ fn notify_new_returned(app: &tauri::AppHandle, state: &WorkspaceState) {
             .show();
     }
 
-    // Replace seen set with current returned IDs so accepted/rejected tasks
-    // can re-notify if they ever return again.
     *seen = returned_ids;
 }
-
-

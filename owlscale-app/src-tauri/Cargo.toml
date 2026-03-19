@@ -26,6 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 notify = "6"
 tokio = { version = "1", features = ["full"] }
+owlscale-protocol = { path = "../../crates/owlscale-protocol" }
 
 [dev-dependencies]
 tempfile = "3"

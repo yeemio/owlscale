@@ -7,26 +7,108 @@
 
   let accepting = false
   let rejecting = false
+  let dispatching = false
+  let starting = false
+  let returning = false
   let flashAccept = false
   let expanded = false
+  let returnPacket = ''
+  let returnError = ''
+  let loadingReturn = false
+  let returnSummary = ''
+  let returnFilesChanged = ''
+  let returnSubmitError = ''
 
   const badgeConfig: Record<
     TaskInfo['status'],
     { label: string; background: string; color: string }
   > = {
     returned: { label: 'REVIEW', background: 'var(--accent-orange)', color: 'var(--bg-primary)' },
-    dispatched: { label: 'WORKING', background: '#636366', color: 'var(--text-primary)' },
+    draft: { label: 'DRAFT', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' },
+    dispatched: { label: 'QUEUED', background: '#636366', color: 'var(--text-primary)' },
     in_progress: { label: 'IN PROG', background: 'var(--accent-blue)', color: 'var(--text-primary)' },
     accepted: { label: 'DONE', background: 'var(--accent-green)', color: 'var(--bg-primary)' },
     rejected: { label: 'REJECTED', background: 'var(--accent-red)', color: 'var(--text-primary)' },
-    draft: { label: 'DRAFT', background: 'var(--bg-tertiary)', color: 'var(--text-secondary)' },
   }
 
   $: badge = badgeConfig[task.status]
+  $: if (task.status === 'in_progress' && !returnSummary) {
+    returnSummary = task.goal ?? `Completed ${task.id}`
+  }
+
+  async function loadReturnPacket() {
+    if (task.status !== 'returned' || returnPacket || loadingReturn) return
+    loadingReturn = true
+    returnError = ''
+    try {
+      returnPacket = await invoke<string>('get_return_packet', { taskId: task.id })
+    } catch (e) {
+      returnError = e instanceof Error ? e.message : String(e)
+      console.error('get_return_packet failed:', e)
+    } finally {
+      loadingReturn = false
+    }
+  }
 
   function handleCardClick(e: MouseEvent) {
     if ((e.target as Element).closest('.task-actions')) return
     expanded = !expanded
+    if (expanded) {
+      loadReturnPacket().catch(console.error)
+    }
+  }
+
+  const handleDispatch = async () => {
+    dispatching = true
+    try {
+      await invoke('dispatch_task', { taskId: task.id, assignee: task.assignee })
+    } catch (e) {
+      console.error('dispatch_task failed:', e)
+    } finally {
+      dispatching = false
+    }
+  }
+
+  const handleStart = async () => {
+    starting = true
+    try {
+      await invoke('start_task', { taskId: task.id })
+    } catch (e) {
+      console.error('start_task failed:', e)
+    } finally {
+      starting = false
+    }
+  }
+
+  const handleReturn = async () => {
+    returnSubmitError = ''
+    const filesChanged = returnFilesChanged
+      .split(/[\n,]/)
+      .map(value => value.trim())
+      .filter(Boolean)
+    if (!returnSummary.trim()) {
+      returnSubmitError = 'Summary is required.'
+      return
+    }
+    if (filesChanged.length === 0) {
+      returnSubmitError = 'At least one changed file is required.'
+      return
+    }
+
+    returning = true
+    try {
+      await invoke('return_task', {
+        taskId: task.id,
+        summary: returnSummary.trim(),
+        filesChanged,
+      })
+      returnSubmitError = ''
+    } catch (e) {
+      returnSubmitError = e instanceof Error ? e.message : String(e)
+      console.error('return_task failed:', e)
+    } finally {
+      returning = false
+    }
   }
 
   const handleAccept = async () => {
@@ -34,7 +116,9 @@
     try {
       await invoke('accept_task', { taskId: task.id })
       flashAccept = true
-      setTimeout(() => { flashAccept = false }, 400)
+      setTimeout(() => {
+        flashAccept = false
+      }, 400)
     } catch (e) {
       console.error('accept_task failed:', e)
     } finally {
@@ -81,12 +165,47 @@
     <div class="task-id">{task.id}</div>
   {/if}
 
-  {#if task.status === 'returned'}
+  {#if task.status === 'draft'}
+    <div class="task-actions">
+      <button
+        class="action-button dispatch-button"
+        class:in-flight={dispatching}
+        on:click|stopPropagation={handleDispatch}
+        disabled={dispatching || !task.assignee}
+      >
+        {dispatching ? '…' : 'Dispatch'}
+      </button>
+    </div>
+  {:else if task.status === 'dispatched'}
+    <div class="task-actions">
+      <button
+        class="action-button start-button"
+        class:in-flight={starting}
+        on:click|stopPropagation={handleStart}
+        disabled={starting}
+      >
+        {starting ? '…' : 'Start'}
+      </button>
+    </div>
+  {:else if task.status === 'in_progress'}
+    <div class="task-actions">
+      <button
+        class="action-button return-button"
+        class:in-flight={returning}
+        on:click|stopPropagation={() => {
+          expanded = true
+        }}
+        disabled={returning}
+      >
+        Return…
+      </button>
+    </div>
+  {:else if task.status === 'returned'}
     <div class="task-actions">
       <button
         class="action-button accept-button"
         class:in-flight={accepting}
-        on:click={handleAccept}
+        on:click|stopPropagation={handleAccept}
         disabled={accepting || rejecting}
       >
         {accepting ? '✓' : 'Accept'}
@@ -94,7 +213,7 @@
       <button
         class="action-button reject-button"
         class:in-flight={rejecting}
-        on:click={handleReject}
+        on:click|stopPropagation={handleReject}
         disabled={accepting || rejecting}
       >
         {rejecting ? '…' : 'Reject'}
@@ -109,6 +228,49 @@
         <span class="assignee-chip">{task.assignee ?? 'unassigned'}</span>
         <span class="task-id-full">{task.id}</span>
       </div>
+      {#if task.status === 'returned'}
+        <div class="detail-section">
+          <div class="detail-label">Return Packet</div>
+          {#if loadingReturn}
+            <div class="detail-note">Loading return packet…</div>
+          {:else if returnError}
+            <div class="detail-error">{returnError}</div>
+          {:else if returnPacket}
+            <pre class="packet-preview">{returnPacket}</pre>
+          {:else}
+            <div class="detail-note">No return packet found.</div>
+          {/if}
+        </div>
+      {:else if task.status === 'in_progress'}
+        <div class="detail-section">
+          <div class="detail-label">Return Summary</div>
+          <input
+            class="detail-input"
+            bind:value={returnSummary}
+            placeholder="What was completed?"
+            on:click|stopPropagation
+          />
+          <div class="detail-label">Files Changed</div>
+          <textarea
+            class="detail-textarea"
+            bind:value={returnFilesChanged}
+            placeholder="src/lib.rs, README.md"
+            rows="3"
+            on:click|stopPropagation
+          ></textarea>
+          {#if returnSubmitError}
+            <div class="detail-error">{returnSubmitError}</div>
+          {/if}
+          <button
+            class="action-button return-submit-button"
+            class:in-flight={returning}
+            on:click|stopPropagation={handleReturn}
+            disabled={returning}
+          >
+            {returning ? '…' : 'Mark Returned'}
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 </article>
@@ -162,9 +324,16 @@
     text-overflow: ellipsis;
   }
 
-  .task-goal {
+  .task-goal,
+  .task-id,
+  .full-goal {
     color: var(--text-primary);
     font-size: 12px;
+  }
+
+  .task-goal,
+  .task-id,
+  .task-id-secondary {
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -173,17 +342,6 @@
   .task-id-secondary {
     color: var(--text-secondary);
     font-size: 10px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .task-id {
-    color: var(--text-primary);
-    font-size: 12px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
   }
 
   .task-actions {
@@ -198,6 +356,45 @@
     border-radius: 6px;
     font-size: 11px;
     transition: filter 120ms ease, background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+  }
+
+  .dispatch-button {
+    background: var(--accent-purple);
+    color: var(--text-primary);
+  }
+
+  .start-button {
+    background: var(--accent-blue);
+    color: var(--text-primary);
+  }
+
+  .return-button,
+  .return-submit-button {
+    background: var(--accent-orange);
+    color: var(--bg-primary);
+  }
+
+  .dispatch-button:hover {
+    filter: brightness(0.92);
+  }
+
+  .dispatch-button.in-flight {
+    box-shadow: 0 0 8px rgba(124, 58, 237, 0.45);
+  }
+
+  .start-button:hover,
+  .return-button:hover,
+  .return-submit-button:hover {
+    filter: brightness(0.92);
+  }
+
+  .start-button.in-flight {
+    box-shadow: 0 0 8px rgba(10, 132, 255, 0.45);
+  }
+
+  .return-button.in-flight,
+  .return-submit-button.in-flight {
+    box-shadow: 0 0 8px rgba(255, 159, 10, 0.45);
   }
 
   .accept-button {
@@ -240,7 +437,9 @@
     pointer-events: none;
   }
 
-  .expand-caret.open { transform: rotate(90deg); }
+  .expand-caret.open {
+    transform: rotate(90deg);
+  }
 
   .expand-detail {
     padding-top: 6px;
@@ -249,8 +448,6 @@
   }
 
   .full-goal {
-    font-size: 12px;
-    color: var(--text-primary);
     line-height: 1.5;
     white-space: pre-wrap;
     word-break: break-word;
@@ -275,11 +472,67 @@
   }
 
   .task-id-full {
-    font-family: ui-monospace, "SF Mono", monospace;
+    font-family: ui-monospace, 'SF Mono', monospace;
     font-size: 10px;
     color: #636366;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  .detail-section {
+    margin-top: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .detail-label {
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.4px;
+  }
+
+  .detail-note {
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+
+  .detail-error {
+    color: var(--accent-red);
+    font-size: 11px;
+    white-space: pre-wrap;
+  }
+
+  .detail-input,
+  .detail-textarea {
+    width: 100%;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 11px;
+    padding: 8px 10px;
+  }
+
+  .detail-textarea {
+    resize: vertical;
+    min-height: 72px;
+  }
+
+  .packet-preview {
+    max-height: 180px;
+    overflow: auto;
+    margin: 0;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-family: ui-monospace, 'SF Mono', monospace;
   }
 </style>

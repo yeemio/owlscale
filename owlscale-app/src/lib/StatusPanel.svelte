@@ -7,12 +7,17 @@
 
   export let state: WorkspaceState
   let showSettings = false
+  let createTaskId = ''
+  let createGoal = ''
+  let createAssignee = ''
+  let creating = false
+  let createError = ''
 
   const taskOrder: Record<TaskInfo['status'], number> = {
     returned: 0,
-    dispatched: 1,
-    in_progress: 2,
-    draft: 3,
+    draft: 1,
+    dispatched: 2,
+    in_progress: 3,
     accepted: 4,
     rejected: 5,
   }
@@ -33,6 +38,25 @@
     showSettings = !showSettings
   }
 
+  const handleCreate = async (): Promise<void> => {
+    createError = ''
+    creating = true
+    try {
+      await invoke('create_task', {
+        taskId: createTaskId,
+        goal: createGoal,
+        assignee: createAssignee,
+      })
+      createTaskId = ''
+      createGoal = ''
+    } catch (e) {
+      createError = e instanceof Error ? e.message : String(e)
+      console.error('create_task failed:', e)
+    } finally {
+      creating = false
+    }
+  }
+
   export function openSettings(): void { showSettings = true }
   export function closeSettings(): void { showSettings = false }
 
@@ -48,6 +72,10 @@
       .filter(t => t.status === 'returned')
       .sort((a, b) => a.id.localeCompare(b.id))[0]
     if (first) invoke('reject_task', { taskId: first.id, reason: null }).catch(console.error)
+  }
+
+  $: if (!createAssignee && state.agents.length > 0) {
+    createAssignee = state.agents[0].id
   }
 
   $: sortedTasks = sortTasks(state.tasks)
@@ -101,6 +129,43 @@
         {/key}
       {/if}
     </div>
+
+    <div class="composer-shell">
+      <input
+        class="composer-input"
+        bind:value={createTaskId}
+        placeholder="task id"
+        autocomplete="off"
+      />
+      <input
+        class="composer-input"
+        bind:value={createGoal}
+        placeholder="goal"
+        autocomplete="off"
+      />
+      <div class="composer-row">
+        <select class="composer-select" bind:value={createAssignee} disabled={state.agents.length === 0}>
+          {#if state.agents.length === 0}
+            <option value="">No agents</option>
+          {:else}
+            {#each state.agents as agent (agent.id)}
+              <option value={agent.id}>{agent.id}</option>
+            {/each}
+          {/if}
+        </select>
+        <button
+          class="composer-button"
+          on:click={handleCreate}
+          disabled={creating || !createTaskId.trim() || !createGoal.trim() || !createAssignee}
+        >
+          {creating ? '…' : 'Create Draft'}
+        </button>
+      </div>
+      {#if createError}
+        <div class="composer-error">{createError}</div>
+      {/if}
+    </div>
+
     <div class="section-list">
       {#each sortedTasks as task (task.id)}
         <TaskCard {task} />
@@ -199,6 +264,52 @@
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.5px;
+  }
+
+  .composer-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 12px 10px;
+  }
+
+  .composer-row {
+    display: flex;
+    gap: 8px;
+  }
+
+  .composer-input,
+  .composer-select,
+  .composer-button {
+    height: 30px;
+    border-radius: 8px;
+    font-size: 12px;
+  }
+
+  .composer-input,
+  .composer-select {
+    width: 100%;
+    padding: 0 10px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+  }
+
+  .composer-button {
+    min-width: 96px;
+    padding: 0 12px;
+    background: var(--accent-purple);
+    color: var(--text-primary);
+  }
+
+  .composer-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .composer-error {
+    font-size: 11px;
+    color: var(--accent-red);
   }
 
   .section-list {
