@@ -1,0 +1,3 @@
+[workspace]
+members = ["crates/owlscale-protocol", "owlscale-app/src-tauri"]
+resolver = "2"

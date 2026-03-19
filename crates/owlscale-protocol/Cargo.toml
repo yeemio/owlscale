@@ -1,0 +1,18 @@
+[package]
+name = "owlscale-protocol"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "owlscale"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["clock", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+uuid = { version = "1", features = ["serde", "v4"] }
