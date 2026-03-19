@@ -1,14 +1,7 @@
-__pycache__/
-*.py[cod]
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
-.pytest_cache/
-.mypy_cache/
-*.egg
 .DS_Store
 .owlscale/
+.venv/
 node_modules/
+target/
+owlscale-app/dist/
 owlscale-app/src-tauri/target/
