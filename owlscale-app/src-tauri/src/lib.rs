@@ -1,9 +1,4 @@
-use owlscale_protocol::{
-    create_task as protocol_create_task, load_task, now_iso8601, transition_task,
-    validate_context_packet_text, validate_return_packet_text,
-};
 use std::collections::HashSet;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -13,20 +8,27 @@ use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 mod config;
+mod git_ops;
 mod state_reader;
 mod watcher;
+mod worktrees;
 
 use config::{load_config, save_config, AppConfig};
-use state_reader::WorkspaceState;
+use state_reader::{TaskEvent, WorkspaceState};
+use worktrees::RegisteredWorktree;
 
 pub struct AppState {
     pub workspace_state: Arc<Mutex<Option<WorkspaceState>>>,
     pub owlscale_dir: Arc<Mutex<Option<PathBuf>>>,
     pub config: Arc<Mutex<AppConfig>>,
+    /// Task IDs that have already triggered a "returned" notification; prevents duplicates.
     pub seen_returned: Arc<Mutex<HashSet<String>>>,
+    /// Cancel flag for the active file watcher thread; set to true to stop it.
     pub watcher_cancel: Arc<Mutex<Option<Arc<AtomicBool>>>>,
 }
 
+/// Walk parent directories from `cwd` to find `.owlscale/`, mirroring the
+/// Python `get_workspace_root()` logic in `owlscale/core.py`.
 fn find_owlscale_dir() -> Option<PathBuf> {
     let mut current = std::env::current_dir().ok()?;
     loop {
@@ -34,7 +36,7 @@ fn find_owlscale_dir() -> Option<PathBuf> {
         if candidate.exists() && candidate.is_dir() {
             return Some(candidate);
         }
-        let parent = current.parent().map(|value| value.to_path_buf())?;
+        let parent = current.parent().map(|p| p.to_path_buf())?;
         current = parent;
     }
 }
@@ -47,6 +49,14 @@ fn normalize_workspace_dir(path: &Path) -> PathBuf {
     }
 }
 
+fn validated_workspace_dir(path: &Path) -> Result<PathBuf, String> {
+    let owlscale_dir = normalize_workspace_dir(path);
+    if !owlscale_dir.exists() {
+        return Err(format!("No .owlscale/ found at {}", path.display()));
+    }
+    Ok(owlscale_dir)
+}
+
 fn resolve_startup_workspace_dir(config: &AppConfig) -> Option<PathBuf> {
     if let Some(saved) = config.workspace_dir.as_deref() {
         let path = normalize_workspace_dir(Path::new(saved));
@@ -57,6 +67,101 @@ fn resolve_startup_workspace_dir(config: &AppConfig) -> Option<PathBuf> {
     find_owlscale_dir()
 }
 
+fn current_owlscale_dir(state: &tauri::State<'_, AppState>) -> Result<PathBuf, String> {
+    state
+        .owlscale_dir
+        .lock()
+        .map_err(|e| e.to_string())?
+        .clone()
+        .ok_or_else(|| "workspace_not_loaded: no workspace loaded".to_string())
+}
+
+fn required_review_agent_id(owlscale_dir: &Path) -> Result<String, String> {
+    let workspace = state_reader::read_workspace_state(owlscale_dir)?;
+    workspace
+        .agent_policy
+        .and_then(|policy| policy.default_review_agent_id)
+        .ok_or_else(|| {
+            "ownership_required: default review agent is not configured".to_string()
+        })
+}
+
+fn refresh_workspace_state(
+    state: &tauri::State<'_, AppState>,
+    app: &tauri::AppHandle,
+    owlscale_dir: &Path,
+) -> Result<WorkspaceState, String> {
+    let ws = state_reader::read_workspace_state(owlscale_dir)?;
+    if let Ok(mut guard) = state.workspace_state.lock() {
+        *guard = Some(ws.clone());
+    }
+    update_tray_icon(app, ws.pending_review);
+    rebuild_tray_menu(app, &ws);
+    app.emit("owlscale://state-changed", &ws)
+        .map_err(|e| e.to_string())?;
+    Ok(ws)
+}
+
+fn activate_workspace_dir(
+    state: &tauri::State<'_, AppState>,
+    app: &tauri::AppHandle,
+    owlscale_dir: PathBuf,
+) -> Result<(), String> {
+    let ws = state_reader::read_workspace_state(&owlscale_dir)?;
+    if let Ok(mut cancel_guard) = state.watcher_cancel.lock() {
+        if let Some(old_cancel) = cancel_guard.take() {
+            old_cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    let config_to_save = {
+        let mut ws_guard = state.workspace_state.lock().map_err(|e| e.to_string())?;
+        *ws_guard = Some(ws.clone());
+
+        let mut dir_guard = state.owlscale_dir.lock().map_err(|e| e.to_string())?;
+        *dir_guard = Some(owlscale_dir.clone());
+
+        let mut config_guard = state.config.lock().map_err(|e| e.to_string())?;
+        config_guard.workspace_dir = Some(owlscale_dir.display().to_string());
+
+        let mut seen_guard = state.seen_returned.lock().map_err(|e| e.to_string())?;
+        seen_guard.clear();
+
+        config_guard.clone()
+    };
+    save_config(&config_to_save);
+
+    update_tray_icon(app, ws.pending_review);
+    rebuild_tray_menu(app, &ws);
+    app.emit("owlscale://state-changed", &ws)
+        .map_err(|e| e.to_string())?;
+    let cancel = watcher::start_watcher(owlscale_dir, app.clone(), Arc::clone(&state.workspace_state));
+    if let Ok(mut cancel_guard) = state.watcher_cancel.lock() {
+        *cancel_guard = Some(cancel);
+    }
+    Ok(())
+}
+
+fn ensure_task_status(owlscale_dir: &Path, task_id: &str, allowed: &[&str]) -> Result<(), String> {
+    let workspace = state_reader::read_workspace_state(owlscale_dir)?;
+    let task = workspace
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .ok_or_else(|| format!("Task '{task_id}' not found"))?;
+    if allowed.iter().any(|status| *status == task.status) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Task '{task_id}' is in '{}' state; expected one of: {}",
+            task.status,
+            allowed.join(", ")
+        ))
+    }
+}
+
+/// Swap the menu-bar tray icon to reflect pending review count.
+/// grey = idle, orange = tasks waiting for review.
 pub(crate) fn update_tray_icon(app: &tauri::AppHandle, pending_review: usize) {
     let icon_bytes: &[u8] = if pending_review > 0 {
         include_bytes!("../icons/tray-review.png")
@@ -70,47 +175,49 @@ pub(crate) fn update_tray_icon(app: &tauri::AppHandle, pending_review: usize) {
     }
 }
 
+/// Rebuild the tray menu dynamically to show pending review count and first 3 returned tasks.
 pub(crate) fn rebuild_tray_menu(app: &tauri::AppHandle, state: &WorkspaceState) {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 
     let title = if state.pending_review > 0 {
-        format!("owlscale · {} to review", state.pending_review)
+        format!("owlscale \u{00b7} {} to review", state.pending_review)
     } else {
-        "owlscale · idle".to_string()
+        "owlscale \u{00b7} idle".to_string()
     };
 
     let title_item =
         match MenuItem::<tauri::Wry>::with_id(app, "title", &title, false, None::<&str>) {
-            Ok(value) => value,
+            Ok(v) => v,
             Err(_) => return,
         };
     let sep1 = match PredefinedMenuItem::<tauri::Wry>::separator(app) {
-        Ok(value) => value,
+        Ok(v) => v,
         Err(_) => return,
     };
     let show_item =
         match MenuItem::<tauri::Wry>::with_id(app, "show", "Show Window", true, None::<&str>) {
-            Ok(value) => value,
+            Ok(v) => v,
             Err(_) => return,
         };
     let quit_item = match MenuItem::<tauri::Wry>::with_id(app, "quit", "Quit", true, None::<&str>) {
-        Ok(value) => value,
+        Ok(v) => v,
         Err(_) => return,
     };
 
     let returned: Vec<_> = state
         .tasks
         .iter()
-        .filter(|task| task.status == "returned")
+        .filter(|t| t.status == "returned")
         .take(3)
         .collect();
+
     let task_items: Vec<MenuItem<tauri::Wry>> = returned
         .iter()
-        .filter_map(|task| {
-            let label = format!("↩ {}", task.id);
+        .filter_map(|t| {
+            let label = format!("\u{21a9} {}", &t.id);
             MenuItem::<tauri::Wry>::with_id(
                 app,
-                format!("task-{}", task.id),
+                format!("task-{}", t.id),
                 label,
                 true,
                 None::<&str>,
@@ -118,14 +225,15 @@ pub(crate) fn rebuild_tray_menu(app: &tauri::AppHandle, state: &WorkspaceState) 
             .ok()
         })
         .collect();
+
     let sep2 = match PredefinedMenuItem::<tauri::Wry>::separator(app) {
-        Ok(value) => value,
+        Ok(v) => v,
         Err(_) => return,
     };
 
     let mut items: Vec<&dyn tauri::menu::IsMenuItem<tauri::Wry>> = vec![&title_item, &sep1];
-    for item in &task_items {
-        items.push(item);
+    for ti in &task_items {
+        items.push(ti);
     }
     if !task_items.is_empty() {
         items.push(&sep2);
@@ -140,87 +248,26 @@ pub(crate) fn rebuild_tray_menu(app: &tauri::AppHandle, state: &WorkspaceState) 
     }
 }
 
-fn current_owlscale_dir(state: &tauri::State<'_, AppState>) -> Result<PathBuf, String> {
-    state
-        .owlscale_dir
-        .lock()
-        .map_err(|err| err.to_string())?
-        .clone()
-        .ok_or_else(|| "No workspace loaded — call set_workspace_dir first".to_string())
-}
-
-fn emit_workspace_refresh(
-    state: &tauri::State<'_, AppState>,
-    app: &tauri::AppHandle,
-    owlscale_dir: &Path,
-) -> Result<(), String> {
-    let workspace = state_reader::read_workspace_state(owlscale_dir)?;
-    {
-        let mut guard = state
-            .workspace_state
-            .lock()
-            .map_err(|err| err.to_string())?;
-        *guard = Some(workspace.clone());
-    }
-    update_tray_icon(app, workspace.pending_review);
-    rebuild_tray_menu(app, &workspace);
-    app.emit("owlscale://state-changed", &workspace)
-        .map_err(|err| err.to_string())
-}
-
-fn build_context_packet(task_id: &str, goal: &str, assignee: &str) -> String {
-    format!(
-        "---\nid: {}\ngoal: {}\nassignee: {}\ncreated_at: {}\n---\n\n# Context\n\n{}\n",
-        yaml_scalar(task_id),
-        yaml_scalar(goal),
-        yaml_scalar(assignee),
-        now_iso8601(),
-        goal
-    )
-}
-
-fn yaml_scalar(value: &str) -> String {
-    format!("{value:?}")
-}
-
-fn build_return_packet(task_id: &str, summary: &str, files_changed: &[String]) -> String {
-    let mut packet = format!(
-        "---\nid: {}\nsummary: {}\nfiles_changed:\n",
-        yaml_scalar(task_id),
-        yaml_scalar(summary)
-    );
-    for path in files_changed {
-        packet.push_str(&format!("  - {}\n", yaml_scalar(path)));
-    }
-    packet.push_str(&format!(
-        "generated_at: {}\n---\n\n# Return\n\n{}\n",
-        now_iso8601(),
-        summary
-    ));
-    packet
-}
+// ─── Tauri commands ───────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn get_workspace_state(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<WorkspaceState, String> {
-    let guard = state
-        .workspace_state
-        .lock()
-        .map_err(|err| err.to_string())?;
-    let workspace = guard
+    let guard = state.workspace_state.lock().map_err(|e| e.to_string())?;
+    let ws = guard
         .clone()
         .ok_or_else(|| "No workspace loaded — call set_workspace_dir first".to_string())?;
-    let pending = workspace.pending_review;
+    let pending = ws.pending_review;
     drop(guard);
     update_tray_icon(&app, pending);
-    Ok(workspace)
+    Ok(ws)
 }
 
 #[tauri::command]
 fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppConfig, String> {
-    let config = state.config.lock().map_err(|err| err.to_string())?;
+    let config = state.config.lock().map_err(|e| e.to_string())?;
     Ok(config.clone())
 }
 
@@ -231,176 +278,9 @@ fn get_task_packet(task_id: String, state: tauri::State<'_, AppState>) -> Result
 }
 
 #[tauri::command]
-fn get_return_packet(task_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+fn list_worktrees(state: tauri::State<'_, AppState>) -> Result<Vec<RegisteredWorktree>, String> {
     let owlscale_dir = current_owlscale_dir(&state)?;
-    state_reader::read_return_packet(&owlscale_dir, &task_id)
-}
-
-#[tauri::command]
-fn create_task(
-    task_id: String,
-    goal: String,
-    assignee: String,
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    let owlscale_dir = current_owlscale_dir(&state)?;
-    let task_id = task_id.trim().to_string();
-    let goal = goal.trim().to_string();
-    let assignee = assignee.trim().to_string();
-
-    if task_id.is_empty() {
-        return Err("Task ID is required.".to_string());
-    }
-    if goal.is_empty() {
-        return Err("Goal is required.".to_string());
-    }
-    if assignee.is_empty() {
-        return Err("Assignee is required.".to_string());
-    }
-
-    let task_path = owlscale_dir.join("tasks").join(format!("{task_id}.json"));
-    if task_path.exists() {
-        return Err(format!("Task '{task_id}' already exists."));
-    }
-
-    let packet_relative = format!(".owlscale/packets/{task_id}.md");
-    let packet_path = owlscale_dir
-        .parent()
-        .unwrap_or(&owlscale_dir)
-        .join(&packet_relative);
-    if packet_path.exists() {
-        return Err(format!("Packet '{packet_relative}' already exists."));
-    }
-
-    let packet_content = build_context_packet(&task_id, &goal, &assignee);
-    let validation = validate_context_packet_text(&packet_content, Some(&task_id));
-    if !validation.valid {
-        return Err(format!(
-            "Context Packet invalid: {}",
-            validation.errors.join("; ")
-        ));
-    }
-
-    fs::write(&packet_path, packet_content).map_err(|err| err.to_string())?;
-    protocol_create_task(
-        &owlscale_dir,
-        &task_id,
-        Some(packet_relative),
-        None,
-        Some(assignee),
-        None,
-    )
-    .map_err(|err| err.to_string())?;
-
-    emit_workspace_refresh(&state, &app, &owlscale_dir)
-}
-
-#[tauri::command]
-fn dispatch_task(
-    task_id: String,
-    assignee: Option<String>,
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    let owlscale_dir = current_owlscale_dir(&state)?;
-    let current = load_task(&owlscale_dir, &task_id).map_err(|err| err.to_string())?;
-    let final_assignee = assignee
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .or_else(|| current.assignee.clone())
-        .ok_or_else(|| "Dispatch requires assignee.".to_string())?;
-
-    transition_task(
-        &owlscale_dir,
-        &task_id,
-        "dispatched",
-        Some(current.version),
-        Some(final_assignee),
-        current.worktree_id.clone(),
-        None,
-        None,
-    )
-    .map_err(|err| err.to_string())?;
-
-    emit_workspace_refresh(&state, &app, &owlscale_dir)
-}
-
-#[tauri::command]
-fn start_task(
-    task_id: String,
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    let owlscale_dir = current_owlscale_dir(&state)?;
-    let current = load_task(&owlscale_dir, &task_id).map_err(|err| err.to_string())?;
-    transition_task(
-        &owlscale_dir,
-        &task_id,
-        "in_progress",
-        Some(current.version),
-        None,
-        None,
-        None,
-        None,
-    )
-    .map_err(|err| err.to_string())?;
-
-    emit_workspace_refresh(&state, &app, &owlscale_dir)
-}
-
-#[tauri::command]
-fn return_task(
-    task_id: String,
-    summary: String,
-    files_changed: Vec<String>,
-    state: tauri::State<'_, AppState>,
-    app: tauri::AppHandle,
-) -> Result<(), String> {
-    let owlscale_dir = current_owlscale_dir(&state)?;
-    let current = load_task(&owlscale_dir, &task_id).map_err(|err| err.to_string())?;
-    let summary = summary.trim().to_string();
-    if summary.is_empty() {
-        return Err("Return summary is required.".to_string());
-    }
-
-    let files_changed: Vec<String> = files_changed
-        .into_iter()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .collect();
-    if files_changed.is_empty() {
-        return Err("At least one changed file is required.".to_string());
-    }
-
-    let return_relative = format!(".owlscale/returns/{task_id}.md");
-    let return_path = owlscale_dir
-        .parent()
-        .unwrap_or(&owlscale_dir)
-        .join(&return_relative);
-    let packet_content = build_return_packet(&task_id, &summary, &files_changed);
-    let validation = validate_return_packet_text(&packet_content, Some(&task_id));
-    if !validation.valid {
-        return Err(format!(
-            "Return Packet invalid: {}",
-            validation.errors.join("; ")
-        ));
-    }
-
-    fs::write(&return_path, packet_content).map_err(|err| err.to_string())?;
-    transition_task(
-        &owlscale_dir,
-        &task_id,
-        "returned",
-        Some(current.version),
-        None,
-        None,
-        Some(return_relative),
-        None,
-    )
-    .map_err(|err| err.to_string())?;
-
-    emit_workspace_refresh(&state, &app, &owlscale_dir)
+    worktrees::list_worktrees(&owlscale_dir)
 }
 
 #[tauri::command]
@@ -409,20 +289,10 @@ fn accept_task(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let owlscale_dir = current_owlscale_dir(&state)?;
-    let current = load_task(&owlscale_dir, &task_id).map_err(|err| err.to_string())?;
-    transition_task(
-        &owlscale_dir,
-        &task_id,
-        "accepted",
-        Some(current.version),
-        None,
-        None,
-        None,
-        None,
-    )
-    .map_err(|err| err.to_string())?;
-    emit_workspace_refresh(&state, &app, &owlscale_dir)
+    let dir = current_owlscale_dir(&state)?;
+    state_reader::accept_task_direct(&dir, &task_id)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -432,20 +302,10 @@ fn reject_task(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let owlscale_dir = current_owlscale_dir(&state)?;
-    let current = load_task(&owlscale_dir, &task_id).map_err(|err| err.to_string())?;
-    transition_task(
-        &owlscale_dir,
-        &task_id,
-        "rejected",
-        Some(current.version),
-        None,
-        None,
-        None,
-        reason,
-    )
-    .map_err(|err| err.to_string())?;
-    emit_workspace_refresh(&state, &app, &owlscale_dir)
+    let dir = current_owlscale_dir(&state)?;
+    state_reader::reject_task_direct(&dir, &task_id, reason.as_deref())?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -454,47 +314,8 @@ fn set_workspace_dir(
     state: tauri::State<'_, AppState>,
     app: tauri::AppHandle,
 ) -> Result<(), String> {
-    let owlscale_dir = normalize_workspace_dir(Path::new(&path));
-    if !owlscale_dir.exists() {
-        return Err(format!("No .owlscale/ found at {path}"));
-    }
-
-    let workspace = state_reader::read_workspace_state(&owlscale_dir)?;
-    if let Ok(mut cancel_guard) = state.watcher_cancel.lock() {
-        if let Some(old_cancel) = cancel_guard.take() {
-            old_cancel.store(true, Ordering::Relaxed);
-        }
-    }
-
-    let config_to_save = {
-        let mut workspace_guard = state
-            .workspace_state
-            .lock()
-            .map_err(|err| err.to_string())?;
-        *workspace_guard = Some(workspace.clone());
-
-        let mut dir_guard = state.owlscale_dir.lock().map_err(|err| err.to_string())?;
-        *dir_guard = Some(owlscale_dir.clone());
-
-        let mut config_guard = state.config.lock().map_err(|err| err.to_string())?;
-        config_guard.workspace_dir = Some(owlscale_dir.display().to_string());
-
-        let mut seen_guard = state.seen_returned.lock().map_err(|err| err.to_string())?;
-        seen_guard.clear();
-
-        config_guard.clone()
-    };
-    save_config(&config_to_save);
-
-    update_tray_icon(&app, workspace.pending_review);
-    rebuild_tray_menu(&app, &workspace);
-    app.emit("owlscale://state-changed", &workspace)
-        .map_err(|err| err.to_string())?;
-    let cancel = watcher::start_watcher(owlscale_dir, app, Arc::clone(&state.workspace_state));
-    if let Ok(mut cancel_guard) = state.watcher_cancel.lock() {
-        *cancel_guard = Some(cancel);
-    }
-    Ok(())
+    let owlscale_dir = validated_workspace_dir(Path::new(&path))?;
+    activate_workspace_dir(&state, &app, owlscale_dir)
 }
 
 #[tauri::command]
@@ -506,15 +327,15 @@ fn set_launch_at_login(
     if enabled {
         app.autolaunch()
             .enable()
-            .map_err(|err| format!("enable autostart failed: {err}"))?;
+            .map_err(|e| format!("enable autostart failed: {e}"))?;
     } else {
         app.autolaunch()
             .disable()
-            .map_err(|err| format!("disable autostart failed: {err}"))?;
+            .map_err(|e| format!("disable autostart failed: {e}"))?;
     }
 
     let config_to_save = {
-        let mut config_guard = state.config.lock().map_err(|err| err.to_string())?;
+        let mut config_guard = state.config.lock().map_err(|e| e.to_string())?;
         config_guard.launch_at_login = enabled;
         config_guard.clone()
     };
@@ -523,7 +344,8 @@ fn set_launch_at_login(
 }
 
 #[tauri::command]
-fn pick_workspace_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
+async fn pick_workspace_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    // async commands run off the main thread, preventing deadlock with macOS dialog
     let selected = app.dialog().file().blocking_pick_folder();
     Ok(selected.and_then(|path| match path {
         FilePath::Path(path_buf) => Some(path_buf.to_string_lossy().into_owned()),
@@ -532,6 +354,19 @@ fn pick_workspace_dir(app: tauri::AppHandle) -> Result<Option<String>, String> {
             .ok()
             .map(|path_buf| path_buf.to_string_lossy().into_owned()),
     }))
+}
+
+#[tauri::command]
+async fn open_workspace_picker(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let Some(selected) = pick_workspace_dir(app.clone()).await? else {
+        return Ok(None);
+    };
+    let owlscale_dir = validated_workspace_dir(Path::new(&selected))?;
+    activate_workspace_dir(&state, &app, owlscale_dir)?;
+    Ok(Some(selected))
 }
 
 #[tauri::command]
@@ -544,13 +379,16 @@ fn open_workspace_in_terminal(
     let dir = state
         .owlscale_dir
         .lock()
-        .map_err(|err| err.to_string())?
+        .unwrap()
         .clone()
         .ok_or_else(|| "no workspace loaded".to_string())?;
+
+    // Open the parent of .owlscale/ (the project root) in Terminal.app
     let project_root = dir
         .parent()
-        .map(|value| value.to_path_buf())
+        .map(|p| p.to_path_buf())
         .unwrap_or_else(|| dir.clone());
+
     let path_str = project_root
         .to_str()
         .ok_or_else(|| "invalid workspace path".to_string())?;
@@ -560,8 +398,180 @@ fn open_workspace_in_terminal(
         .args(["-a", "Terminal", path_str])
         .spawn()
         .map(|_| ())
-        .map_err(|err| err.to_string())
+        .map_err(|e| e.to_string())
 }
+
+// ─── New commands ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn pack_task(
+    task_id: String,
+    goal: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let dir = current_owlscale_dir(&state)?;
+    state_reader::pack_task_direct(&dir, &task_id, &goal)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn dispatch_task(
+    task_id: String,
+    agent_id: String,
+    worktree_mode: Option<String>,
+    worktree_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let dir = current_owlscale_dir(&state)?;
+    ensure_task_status(&dir, &task_id, &["draft", "ready"])?;
+    let selected_worktree_id = match worktree_mode.as_deref() {
+        Some("bind") => {
+            let worktree_id = worktree_id
+                .as_deref()
+                .ok_or_else(|| "Select an existing worktree to bind.".to_string())?;
+            let worktree = git_ops::ensure_registered_worktree_exists(&dir, worktree_id)?;
+            let _ = worktrees::assign_worktree_agent(&dir, &worktree.id, Some(&agent_id))?;
+            Some(worktree.id)
+        }
+        Some("create") | None => {
+            let worktree = git_ops::create_coding_worktree(&dir, &task_id, Some(&agent_id))?;
+            Some(worktree.id)
+        }
+        Some(other) => {
+            return Err(format!("Unknown worktree mode '{other}'."));
+        }
+    };
+    state_reader::dispatch_task_direct(&dir, &task_id, &agent_id, selected_worktree_id.as_deref())?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn get_return_packet(task_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let dir = current_owlscale_dir(&state)?;
+    state_reader::read_return_packet(&dir, &task_id)
+}
+
+#[tauri::command]
+fn get_task_timeline(
+    task_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<TaskEvent>, String> {
+    let dir = current_owlscale_dir(&state)?;
+    Ok(state_reader::read_task_events(&dir, task_id.as_deref()))
+}
+
+#[tauri::command]
+fn create_coding_worktree(
+    task_id: String,
+    agent_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<RegisteredWorktree, String> {
+    let dir = current_owlscale_dir(&state)?;
+    ensure_task_status(&dir, &task_id, &["draft", "ready", "dispatched"])?;
+    let worktree = git_ops::create_coding_worktree(&dir, &task_id, agent_id.as_deref())?;
+    state_reader::bind_task_worktree_direct(&dir, &task_id, &worktree.id)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(worktree)
+}
+
+#[tauri::command]
+fn bind_task_worktree(
+    task_id: String,
+    worktree_id: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let dir = current_owlscale_dir(&state)?;
+    git_ops::ensure_registered_worktree_exists(&dir, &worktree_id)?;
+    let workspace = state_reader::read_workspace_state(&dir)?;
+    let agent_id = workspace
+        .tasks
+        .iter()
+        .find(|task| task.id == task_id)
+        .and_then(|task| task.assignee.clone());
+    let _ = worktrees::assign_worktree_agent(&dir, &worktree_id, agent_id.as_deref())?;
+    state_reader::bind_task_worktree_direct(&dir, &task_id, &worktree_id)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn create_review_worktree(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<RegisteredWorktree, String> {
+    let dir = current_owlscale_dir(&state)?;
+    ensure_task_status(&dir, &task_id, &["returned"])?;
+    let review_agent_id = required_review_agent_id(&dir)?;
+    let worktree = git_ops::create_review_worktree(&dir, &task_id, &review_agent_id)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(worktree)
+}
+
+#[tauri::command]
+fn open_worktree(
+    worktree_id: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+
+    let dir = current_owlscale_dir(&state)?;
+    let worktree = git_ops::ensure_registered_worktree_exists(&dir, &worktree_id)?;
+    app.shell()
+        .command("open")
+        .args(["-a", "Terminal", &worktree.path])
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn manual_refresh(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<WorkspaceState, String> {
+    let dir = current_owlscale_dir(&state)?;
+    refresh_workspace_state(&state, &app, &dir)
+}
+
+#[tauri::command]
+fn scan_workspaces() -> Vec<String> {
+    state_reader::scan_common_workspaces()
+}
+
+#[tauri::command]
+fn set_notifications_enabled(
+    enabled: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let config_to_save = {
+        let mut config = state.config.lock().map_err(|e| e.to_string())?;
+        config.notifications_enabled = enabled;
+        config.clone()
+    };
+    save_config(&config_to_save);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_refresh_interval(secs: u64, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let config_to_save = {
+        let mut config = state.config.lock().map_err(|e| e.to_string())?;
+        config.refresh_interval_secs = secs;
+        config.clone()
+    };
+    save_config(&config_to_save);
+    Ok(())
+}
+
+// ─── App entry point ─────────────────────────────────────────────────────────
 
 pub fn run() {
     let config = load_config();
@@ -573,9 +583,10 @@ pub fn run() {
         watcher_cancel: Arc::new(Mutex::new(None)),
     };
 
+    // Prefer saved config workspace and fall back to auto-detect from cwd.
     if let Some(owlscale_dir) = resolve_startup_workspace_dir(&config) {
-        if let Ok(workspace) = state_reader::read_workspace_state(&owlscale_dir) {
-            *app_state.workspace_state.lock().unwrap() = Some(workspace);
+        if let Ok(ws) = state_reader::read_workspace_state(&owlscale_dir) {
+            *app_state.workspace_state.lock().unwrap() = Some(ws);
         }
         *app_state.owlscale_dir.lock().unwrap() = Some(owlscale_dir);
     }
@@ -592,6 +603,8 @@ pub fn run() {
         .setup(|app| {
             let state = app.state::<AppState>();
             let owlscale_dir = state.owlscale_dir.lock().unwrap().clone();
+
+            // Start the file watcher if a workspace was detected
             if let Some(dir) = owlscale_dir {
                 let cancel = watcher::start_watcher(
                     dir,
@@ -603,9 +616,11 @@ pub fn run() {
                 }
             }
 
+            // ── System tray (id = "main" so update_tray_icon can find it) ──
             let icon_bytes = include_bytes!("../icons/tray-idle.png");
             let icon =
-                Image::from_bytes(icon_bytes).map_err(|err| format!("tray icon error: {err}"))?;
+                Image::from_bytes(icon_bytes).map_err(|e| format!("tray icon error: {e}"))?;
+
             let show_item =
                 tauri::menu::MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let quit_item =
@@ -618,16 +633,18 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app: &tauri::AppHandle, event| match event.id.as_ref() {
                     "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        app.exit(0);
+                    }
                     id if id.starts_with("task-") => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.set_focus();
                         }
                         let task_id = id.strip_prefix("task-").unwrap_or("").to_string();
                         let _ = app.emit("owlscale://focus-task", task_id);
@@ -636,9 +653,10 @@ pub fn run() {
                 })
                 .build(app)?;
 
+            // Rebuild tray menu with initial workspace state
             if let Ok(guard) = state.workspace_state.lock() {
-                if let Some(workspace) = guard.as_ref() {
-                    rebuild_tray_menu(app.handle(), workspace);
+                if let Some(ws) = guard.as_ref() {
+                    rebuild_tray_menu(app.handle(), ws);
                 }
             }
 
@@ -648,18 +666,93 @@ pub fn run() {
             get_workspace_state,
             get_settings,
             get_task_packet,
-            get_return_packet,
-            create_task,
-            dispatch_task,
-            start_task,
-            return_task,
+            list_worktrees,
             accept_task,
             reject_task,
+            pack_task,
+            dispatch_task,
+            get_return_packet,
+            get_task_timeline,
+            create_coding_worktree,
+            bind_task_worktree,
+            create_review_worktree,
+            open_worktree,
+            manual_refresh,
+            scan_workspaces,
             set_workspace_dir,
             set_launch_at_login,
+            set_notifications_enabled,
+            set_refresh_interval,
             pick_workspace_dir,
+            open_workspace_picker,
             open_workspace_in_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_workspace_dir, required_review_agent_id, validated_workspace_dir};
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    fn setup_workspace(state: &str) -> TempDir {
+        let dir = TempDir::new().unwrap();
+        let ws = dir.path().join(".owlscale");
+        fs::create_dir_all(ws.join("packets")).unwrap();
+        fs::write(ws.join("state.json"), state).unwrap();
+        fs::write(ws.join("roster.json"), r#"{"agents":{}}"#).unwrap();
+        dir
+    }
+
+    #[test]
+    fn required_review_agent_id_reads_default_review_agent() {
+        let dir = setup_workspace(
+            r#"{"version":1,"agent_policy":{"default_execution_agent_id":"exec-agent","default_review_agent_id":"review-agent"},"tasks":{}}"#,
+        );
+        let owlscale_dir = dir.path().join(".owlscale");
+        let review_agent_id = required_review_agent_id(&owlscale_dir).unwrap();
+        assert_eq!(review_agent_id, "review-agent");
+    }
+
+    #[test]
+    fn required_review_agent_id_returns_ownership_required_when_missing() {
+        let dir = setup_workspace(
+            r#"{"version":1,"agent_policy":{"default_execution_agent_id":"exec-agent","default_review_agent_id":null},"tasks":{}}"#,
+        );
+        let owlscale_dir = dir.path().join(".owlscale");
+        let err = required_review_agent_id(&owlscale_dir).unwrap_err();
+        assert!(err.starts_with("ownership_required:"));
+    }
+
+    #[test]
+    fn normalize_workspace_dir_appends_dot_owlscale() {
+        let path = Path::new("/tmp/demo-workspace");
+        assert_eq!(
+            normalize_workspace_dir(path),
+            PathBuf::from("/tmp/demo-workspace/.owlscale")
+        );
+    }
+
+    #[test]
+    fn validated_workspace_dir_accepts_workspace_root_or_owlscale_dir() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("demo");
+        fs::create_dir_all(root.join(".owlscale")).unwrap();
+
+        let from_root = validated_workspace_dir(&root).unwrap();
+        assert_eq!(from_root, root.join(".owlscale"));
+
+        let from_owlscale = validated_workspace_dir(&root.join(".owlscale")).unwrap();
+        assert_eq!(from_owlscale, root.join(".owlscale"));
+    }
+
+    #[test]
+    fn validated_workspace_dir_rejects_missing_owlscale() {
+        let dir = TempDir::new().unwrap();
+        let err = validated_workspace_dir(dir.path()).unwrap_err();
+        assert!(err.contains("No .owlscale/ found"));
+    }
 }
