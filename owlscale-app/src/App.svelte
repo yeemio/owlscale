@@ -6,11 +6,13 @@
   import StatusPanel from './lib/StatusPanel.svelte'
   import FocusPanel from './lib/FocusPanel.svelte'
   import DetailPanel from './lib/DetailPanel.svelte'
+  import CreateTaskSheet from './lib/CreateTaskSheet.svelte'
 
   let state: WorkspaceState | null = null
   let loading = true
   let selectedTaskId: string | null = null
   let statusPanel: StatusPanel
+  let showCreateTaskSheet = false
   let unlistenState: (() => void) | null = null
   let unlistenFocus: (() => void) | null = null
 
@@ -36,6 +38,15 @@
   }
 
   function handleSelect(e: CustomEvent<string>) {
+    selectedTaskId = e.detail
+  }
+
+  function handleCreateTask() {
+    showCreateTaskSheet = true
+  }
+
+  function handleSheetCreated(e: CustomEvent<string>) {
+    showCreateTaskSheet = false
     selectedTaskId = e.detail
   }
 
@@ -83,7 +94,7 @@
   {:else if !state?.dir}
     <div class="app-layout">
       <StatusPanel bind:this={statusPanel} state={null} focusMode="setup" on:select={handleSelect} />
-      <FocusPanel state={null} focusMode="setup" {selectedTaskId} on:select={handleSelect} />
+      <FocusPanel state={null} focusMode="setup" {selectedTaskId} on:select={handleSelect} on:create-task={handleCreateTask} />
       <DetailPanel task={null} worktrees={[]} agents={[]} agentPolicy={null} />
     </div>
   {:else}
@@ -99,6 +110,7 @@
         {focusMode}
         {selectedTaskId}
         on:select={handleSelect}
+        on:create-task={handleCreateTask}
       />
       <DetailPanel
         task={state.tasks.find(t => t.id === selectedTaskId) ?? null}
@@ -108,6 +120,12 @@
       />
     </div>
   {/if}
+
+  <CreateTaskSheet
+    show={showCreateTaskSheet}
+    on:close={() => (showCreateTaskSheet = false)}
+    on:created={handleSheetCreated}
+  />
 </main>
 
 <style>

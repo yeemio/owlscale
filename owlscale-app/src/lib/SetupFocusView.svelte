@@ -1,9 +1,12 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
+  import { createEventDispatcher } from 'svelte'
   import { showSettingsStore } from './settingsStore'
   import type { WorkspaceState } from '../types'
 
   export let state: WorkspaceState | null
+
+  const dispatch = createEventDispatcher<{ 'create-task': void }>()
 
   // S3: session-only dismiss, not persisted
   let ownershipDismissed = false
@@ -30,7 +33,7 @@
   }
 
   function handleCreateFirstTask() {
-    // stub — will wire to task creation flow later
+    dispatch('create-task')
   }
 
   function handleSetDefaultAgents() {

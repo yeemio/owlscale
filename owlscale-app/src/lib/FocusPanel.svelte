@@ -9,16 +9,16 @@
   export let focusMode: FocusMode
   export let selectedTaskId: string | null = null
 
-  const dispatch = createEventDispatcher<{ select: string }>()
+  const dispatch = createEventDispatcher<{ select: string; 'create-task': void }>()
 </script>
 
 <section class="focus-panel">
   {#if focusMode === 'review' && state}
     <ReviewFocusView {state} {selectedTaskId} on:select />
   {:else if focusMode === 'execution' && state}
-    <ExecutionFocusView {state} {selectedTaskId} on:select />
+    <ExecutionFocusView {state} {selectedTaskId} on:select on:create-task />
   {:else}
-    <SetupFocusView {state} />
+    <SetupFocusView {state} on:create-task />
   {/if}
 </section>
 

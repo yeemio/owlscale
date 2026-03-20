@@ -411,9 +411,28 @@ fn pack_task(
     app: tauri::AppHandle,
 ) -> Result<(), String> {
     let dir = current_owlscale_dir(&state)?;
-    state_reader::pack_task_direct(&dir, &task_id, &goal)?;
+    state_reader::create_task_direct(&dir, &goal, Some(&task_id))?;
     refresh_workspace_state(&state, &app, &dir)?;
     Ok(())
+}
+
+#[tauri::command]
+fn suggest_task_id(goal: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let dir = current_owlscale_dir(&state)?;
+    state_reader::suggest_task_id_direct(&dir, &goal)
+}
+
+#[tauri::command]
+fn create_task(
+    goal: String,
+    task_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let dir = current_owlscale_dir(&state)?;
+    let final_task_id = state_reader::create_task_direct(&dir, &goal, task_id.as_deref())?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(final_task_id)
 }
 
 #[tauri::command]
@@ -670,6 +689,8 @@ pub fn run() {
             accept_task,
             reject_task,
             pack_task,
+            suggest_task_id,
+            create_task,
             dispatch_task,
             get_return_packet,
             get_task_timeline,

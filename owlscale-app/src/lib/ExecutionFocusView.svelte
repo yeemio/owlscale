@@ -6,7 +6,7 @@
   export let state: WorkspaceState
   export let selectedTaskId: string | null = null
 
-  const dispatch = createEventDispatcher<{ select: string }>()
+  const dispatch = createEventDispatcher<{ select: string; 'create-task': void }>()
 
   $: draftTasks = state.tasks.filter(t => t.status === 'draft')
   $: dispatchedTasks = state.tasks.filter(t => t.status === 'dispatched')
@@ -18,6 +18,10 @@
 
   function dispatchNext() {
     if (draftTasks.length > 0) dispatch('select', draftTasks[0].id)
+  }
+
+  function openCreateSheet() {
+    dispatch('create-task')
   }
 </script>
 
@@ -33,11 +37,10 @@
       <button class="primary-cta" on:click={dispatchNext}>
         Dispatch Next Draft →
       </button>
-    {:else}
-      <button class="secondary-cta" on:click={() => {}}>
-        + Create Task
-      </button>
     {/if}
+    <button class="secondary-cta" on:click={openCreateSheet}>
+      + Create Task
+    </button>
   </header>
 
   <div class="task-list">

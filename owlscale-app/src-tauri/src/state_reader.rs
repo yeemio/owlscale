@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use crate::worktrees::{list_worktrees, RegisteredWorktree};
@@ -318,6 +318,114 @@ fn now_iso8601() -> String {
     chrono::Local::now()
         .format("%Y-%m-%dT%H:%M:%S%.6f%:z")
         .to_string()
+}
+
+fn fallback_task_id() -> String {
+    chrono::Local::now()
+        .format("task-%Y%m%d-%H%M%S")
+        .to_string()
+}
+
+fn slugify_task_seed(value: &str) -> String {
+    let mut output = String::new();
+    let mut last_was_dash = false;
+
+    for ch in value.chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            output.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            output.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    let trimmed = output.trim_matches('-');
+    let truncated = if trimmed.len() > 48 {
+        &trimmed[..48]
+    } else {
+        trimmed
+    };
+
+    truncated.trim_matches('-').to_string()
+}
+
+fn existing_task_ids(owlscale_dir: &Path) -> Result<HashSet<String>, String> {
+    let state_path = owlscale_dir.join("state.json");
+    let raw = std::fs::read_to_string(&state_path).map_err(|e| format!("read state.json: {e}"))?;
+    let parsed: StateJson =
+        serde_json::from_str(&raw).map_err(|e| format!("parse state.json: {e}"))?;
+    Ok(parsed.tasks.into_keys().collect())
+}
+
+fn unique_task_id(existing: &HashSet<String>, base: &str) -> String {
+    if !existing.contains(base) {
+        return base.to_string();
+    }
+
+    let mut suffix = 2usize;
+    loop {
+        let suffix_text = format!("-{suffix}");
+        let max_base_len = 48usize.saturating_sub(suffix_text.len());
+        let truncated = if base.len() > max_base_len {
+            &base[..max_base_len]
+        } else {
+            base
+        };
+        let candidate = format!("{}{}", truncated.trim_matches('-'), suffix_text);
+        if !existing.contains(&candidate) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+pub fn suggest_task_id_direct(owlscale_dir: &Path, goal: &str) -> Result<String, String> {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return Err("invalid_task_goal: goal is required".to_string());
+    }
+
+    let existing = existing_task_ids(owlscale_dir)?;
+    let base = {
+        let slug = slugify_task_seed(goal);
+        if slug.is_empty() {
+            fallback_task_id()
+        } else {
+            slug
+        }
+    };
+    Ok(unique_task_id(&existing, &base))
+}
+
+pub fn create_task_direct(
+    owlscale_dir: &Path,
+    goal: &str,
+    requested_task_id: Option<&str>,
+) -> Result<String, String> {
+    let goal = goal.trim();
+    if goal.is_empty() {
+        return Err("invalid_task_goal: goal is required".to_string());
+    }
+
+    let existing = existing_task_ids(owlscale_dir)?;
+    let final_task_id = match requested_task_id.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(requested) => {
+            let canonical = slugify_task_seed(requested);
+            if canonical.is_empty() {
+                return Err("invalid_task_id: task id must contain ascii letters or digits".to_string());
+            }
+            if existing.contains(&canonical) {
+                return Err(format!("task_conflict: task '{canonical}' already exists"));
+            }
+            canonical
+        }
+        None => suggest_task_id_direct(owlscale_dir, goal)?,
+    };
+
+    pack_task_direct(owlscale_dir, &final_task_id, goal)
+        .map_err(|err| format!("write_failed: {err}"))?;
+    Ok(final_task_id)
 }
 
 fn write_log(owlscale_dir: &Path, entry: &str) {
@@ -812,5 +920,56 @@ Body
         let ws = read_workspace_state(&ws_dir).unwrap();
         let task = ws.tasks.iter().find(|task| task.id == "task-1").unwrap();
         assert!(task.ownership_override);
+    }
+
+    #[test]
+    fn suggest_task_id_slugifies_and_deduplicates() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{"fix-auth-loop":{"status":"draft"}}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+
+        let suggestion = suggest_task_id_direct(&ws_dir, "Fix auth loop").unwrap();
+        assert_eq!(suggestion, "fix-auth-loop-2");
+    }
+
+    #[test]
+    fn suggest_task_id_falls_back_for_non_ascii_goal() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+
+        let suggestion = suggest_task_id_direct(&ws_dir, "修复首次进入工作台空状态").unwrap();
+        assert!(suggestion.starts_with("task-"));
+    }
+
+    #[test]
+    fn create_task_direct_creates_draft_and_packet() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+
+        let task_id = create_task_direct(&ws_dir, "Add rate limiting middleware", None).unwrap();
+        assert_eq!(task_id, "add-rate-limiting-middleware");
+
+        let ws = read_workspace_state(&ws_dir).unwrap();
+        let task = ws.tasks.iter().find(|task| task.id == task_id).unwrap();
+        assert_eq!(task.status, "draft");
+        assert_eq!(task.goal.as_deref(), Some("Add rate limiting middleware"));
+        assert!(ws_dir.join("packets").join(format!("{task_id}.md")).exists());
+    }
+
+    #[test]
+    fn create_task_direct_rejects_conflicting_explicit_id() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{"fix-auth-loop":{"status":"draft"}}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+
+        let err = create_task_direct(&ws_dir, "Something else", Some("fix-auth-loop")).unwrap_err();
+        assert!(err.starts_with("task_conflict:"));
+    }
+
+    #[test]
+    fn create_task_direct_rejects_empty_goal() {
+        let dir = setup_workspace(r#"{"version":1,"tasks":{}}"#, r#"{"agents":{}}"#);
+        let ws_dir = dir.path().join(".owlscale");
+
+        let err = create_task_direct(&ws_dir, "   ", None).unwrap_err();
+        assert!(err.starts_with("invalid_task_goal:"));
     }
 }
