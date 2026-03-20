@@ -7,9 +7,13 @@
 
   const dispatch = createEventDispatcher<{ close: void }>()
 
+  const APP_VERSION = '0.6.0'
+
   let settings: AppConfig = {
     workspace_dir: null,
     launch_at_login: false,
+    notifications_enabled: true,
+    refresh_interval_secs: 3,
   }
   let loading = true
   let busy = false
@@ -59,6 +63,37 @@
     }
   }
 
+  const handleNotificationsToggle = async (event: Event) => {
+    const target = event.currentTarget as HTMLInputElement
+    const enabled = target.checked
+    busy = true
+    error = null
+    try {
+      await invoke('set_notifications_enabled', { enabled })
+      settings = { ...settings, notifications_enabled: enabled }
+    } catch (e) {
+      target.checked = !enabled
+      error = e instanceof Error ? e.message : 'Failed to update notifications.'
+    } finally {
+      busy = false
+    }
+  }
+
+  const handleRefreshInterval = async (event: Event) => {
+    const target = event.currentTarget as HTMLSelectElement
+    const secs = parseInt(target.value, 10)
+    busy = true
+    error = null
+    try {
+      await invoke('set_refresh_interval', { secs })
+      settings = { ...settings, refresh_interval_secs: secs }
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to update refresh interval.'
+    } finally {
+      busy = false
+    }
+  }
+
   const closePanel = () => {
     dispatch('close')
   }
@@ -89,6 +124,8 @@
       <div class="settings-loading">Loading settings…</div>
     {:else}
       <div class="settings-section">
+        <div class="section-heading">General</div>
+
         <div class="setting-row">
           <div class="setting-copy">
             <div class="setting-label">Workspace directory</div>
@@ -115,6 +152,57 @@
           />
         </label>
       </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-section">
+        <div class="section-heading">Notifications &amp; Refresh</div>
+
+        <label class="setting-row toggle-row">
+          <div class="setting-copy">
+            <div class="setting-label">Desktop notifications</div>
+            <div class="setting-hint">Show alerts when tasks are returned for review.</div>
+          </div>
+          <input
+            class="toggle"
+            type="checkbox"
+            checked={settings.notifications_enabled}
+            on:change={handleNotificationsToggle}
+            disabled={busy}
+          />
+        </label>
+
+        <div class="setting-row">
+          <div class="setting-copy">
+            <div class="setting-label">Refresh interval</div>
+            <div class="setting-hint">How often to poll for file changes (watcher debounce).</div>
+          </div>
+          <select
+            class="interval-select"
+            value={settings.refresh_interval_secs}
+            on:change={handleRefreshInterval}
+            disabled={busy}
+          >
+            <option value={1}>1s</option>
+            <option value={2}>2s</option>
+            <option value={3}>3s</option>
+            <option value={5}>5s</option>
+            <option value={10}>10s</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-section about-section">
+        <div class="section-heading">About</div>
+        <div class="about-row">
+          <span class="about-label">owlscale</span>
+          <span class="about-version">v{APP_VERSION}</span>
+        </div>
+        <div class="about-desc">Multi-agent AI coordination dashboard</div>
+        <div class="about-copy">© 2026 owlscale contributors</div>
+      </div>
     {/if}
 
     {#if error}
@@ -129,14 +217,13 @@
 
 <style>
   .settings-backdrop {
-    position: absolute;
+    position: fixed;
     inset: 0;
     z-index: 10;
     display: flex;
-    align-items: flex-start;
+    align-items: center;
     justify-content: center;
-    padding: 10px;
-    background: rgba(0, 0, 0, 0.22);
+    background: rgba(0, 0, 0, 0.4);
   }
 
   .backdrop-dismiss {
@@ -148,7 +235,9 @@
   .settings-panel {
     position: relative;
     z-index: 1;
-    width: 300px;
+    width: 360px;
+    max-height: 80vh;
+    overflow-y: auto;
     border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: 10px;
     background: #242426;
@@ -188,6 +277,20 @@
     padding: 12px;
   }
 
+  .settings-divider {
+    height: 1px;
+    background: var(--border-color);
+    margin: 0;
+  }
+
+  .section-heading {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
   .setting-row {
     display: flex;
     align-items: center;
@@ -204,7 +307,7 @@
     color: var(--text-primary);
     font-size: 12px;
     font-weight: 500;
-    margin-bottom: 4px;
+    margin-bottom: 2px;
   }
 
   .setting-value {
@@ -224,6 +327,61 @@
     height: 16px;
     accent-color: var(--accent-purple);
     flex: 0 0 auto;
+  }
+
+  .interval-select {
+    flex: 0 0 auto;
+    height: 26px;
+    padding: 0 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 11px;
+    -webkit-appearance: none;
+    appearance: none;
+  }
+
+  .interval-select:focus {
+    outline: none;
+    border-color: var(--accent-purple);
+  }
+
+  .about-section {
+    gap: 4px;
+  }
+
+  .about-section .section-heading {
+    margin-bottom: 4px;
+  }
+
+  .about-row {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+  }
+
+  .about-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-purple);
+  }
+
+  .about-version {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: ui-monospace, "SF Mono", monospace;
+  }
+
+  .about-desc {
+    font-size: 11px;
+    color: var(--text-secondary);
+  }
+
+  .about-copy {
+    font-size: 10px;
+    color: var(--text-secondary);
+    opacity: 0.5;
   }
 
   .action-button,

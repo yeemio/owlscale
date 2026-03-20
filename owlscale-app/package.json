@@ -1,11 +1,13 @@
 {
   "name": "owlscale-app",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "desktop:dev": "cargo tauri dev",
     "build": "vite build",
+    "desktop:build": "cargo tauri build",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.json"
   },

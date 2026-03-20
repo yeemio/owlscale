@@ -1,192 +1,94 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core'
-  import AgentCard from './AgentCard.svelte'
+  import { createEventDispatcher } from 'svelte'
   import SettingsPanel from './SettingsPanel.svelte'
-  import TaskCard from './TaskCard.svelte'
-  import type { TaskInfo, WorkspaceState } from '../types'
+  import { showSettingsStore } from './settingsStore'
+  import type { WorkspaceState, FocusMode } from '../types'
 
-  export let state: WorkspaceState
-  let showSettings = false
-  let createTaskId = ''
-  let createGoal = ''
-  let createAssignee = ''
-  let creating = false
-  let createError = ''
+  export let state: WorkspaceState | null
+  export let focusMode: FocusMode = 'setup'
 
-  const taskOrder: Record<TaskInfo['status'], number> = {
-    returned: 0,
-    draft: 1,
-    dispatched: 2,
-    in_progress: 3,
-    accepted: 4,
-    rejected: 5,
+  const dispatch = createEventDispatcher<{ select: string }>()
+
+  const handleRefresh = async (): Promise<void> => {
+    try { await invoke('manual_refresh') } catch (e) { console.error(e) }
   }
-
-  const sortTasks = (tasks: TaskInfo[]): TaskInfo[] =>
-    [...tasks].sort((left, right) => {
-      const priorityDelta = taskOrder[left.status] - taskOrder[right.status]
-      return priorityDelta !== 0 ? priorityDelta : left.id.localeCompare(right.id)
-    })
 
   const openTerminal = (): void => {
-    invoke('open_workspace_in_terminal').catch((e: unknown) =>
-      console.error('open_workspace_in_terminal failed:', e)
-    )
+    invoke('open_workspace_in_terminal').catch(console.error)
   }
 
-  const toggleSettings = (): void => {
-    showSettings = !showSettings
-  }
-
-  const handleCreate = async (): Promise<void> => {
-    createError = ''
-    creating = true
-    try {
-      await invoke('create_task', {
-        taskId: createTaskId,
-        goal: createGoal,
-        assignee: createAssignee,
-      })
-      createTaskId = ''
-      createGoal = ''
-    } catch (e) {
-      createError = e instanceof Error ? e.message : String(e)
-      console.error('create_task failed:', e)
-    } finally {
-      creating = false
-    }
-  }
-
-  export function openSettings(): void { showSettings = true }
-  export function closeSettings(): void { showSettings = false }
-
+  // Exported methods for keyboard shortcuts (called from App.svelte)
   export function acceptFirst(): void {
-    const first = [...state.tasks]
+    const first = [...(state?.tasks ?? [])]
       .filter(t => t.status === 'returned')
       .sort((a, b) => a.id.localeCompare(b.id))[0]
     if (first) invoke('accept_task', { taskId: first.id }).catch(console.error)
   }
 
   export function rejectFirst(): void {
-    const first = [...state.tasks]
+    const first = [...(state?.tasks ?? [])]
       .filter(t => t.status === 'returned')
       .sort((a, b) => a.id.localeCompare(b.id))[0]
     if (first) invoke('reject_task', { taskId: first.id, reason: null }).catch(console.error)
   }
 
-  $: if (!createAssignee && state.agents.length > 0) {
-    createAssignee = state.agents[0].id
+  export function openSettings(): void { showSettingsStore.set(true) }
+  export function closeSettings(): void { showSettingsStore.set(false) }
+
+  export function focusTask(taskId: string): void {
+    dispatch('select', taskId)
   }
 
-  $: sortedTasks = sortTasks(state.tasks)
-  $: activeAgentIds = new Set(
-    state.tasks
-      .filter(t => t.status === 'dispatched' || t.status === 'in_progress')
-      .map(t => t.assignee)
-      .filter((a): a is string => !!a)
-  )
+  $: pendingReview = state?.pending_review ?? 0
 </script>
 
-<section class="panel">
+<aside class="sidebar">
   <header class="header">
     <div class="wordmark">owlscale</div>
     <div class="header-controls">
-      <div class="workspace-path" title={state.dir ?? ''}>{state.dir}</div>
-      <button
-        class="settings-button"
-        type="button"
-        on:click={toggleSettings}
-        aria-label="Open settings"
-      >
-        ⚙
-      </button>
+      <button class="icon-btn" on:click={handleRefresh} title="Refresh">↻</button>
+      <button class="icon-btn" on:click={() => showSettingsStore.set(!$showSettingsStore)} title="Settings (⌘,)">⚙</button>
     </div>
   </header>
 
-  {#if showSettings}
-    <SettingsPanel currentDir={state.dir} on:close={closeSettings} />
+  {#if $showSettingsStore}
+    <SettingsPanel currentDir={state?.dir ?? null} on:close={() => showSettingsStore.set(false)} />
   {/if}
 
-  <div class="divider"></div>
-
-  <section class="section">
-    <div class="section-label">AGENTS</div>
-    <div class="section-list">
-      {#each state.agents as agent (agent.id)}
-        <AgentCard {agent} active={activeAgentIds.has(agent.id)} />
-      {/each}
-    </div>
-  </section>
-
-  <div class="divider"></div>
-
-  <section class="section">
-    <div class="section-heading">
-      <div class="section-label">TASKS</div>
-      {#if state.pending_review > 0}
-        {#key state.pending_review}
-          <div class="review-badge badge-pop-anim">{state.pending_review}</div>
-        {/key}
+  <nav class="nav">
+    <div class="nav-section-label">PRIMARY</div>
+    <div class="nav-item" class:active={focusMode === 'review'}>
+      Review
+      {#if pendingReview > 0}
+        <span class="review-badge">{pendingReview}</span>
       {/if}
     </div>
+    <div class="nav-item" class:active={focusMode === 'execution'}>Tasks</div>
+    <div class="nav-item">Activity</div>
 
-    <div class="composer-shell">
-      <input
-        class="composer-input"
-        bind:value={createTaskId}
-        placeholder="task id"
-        autocomplete="off"
-      />
-      <input
-        class="composer-input"
-        bind:value={createGoal}
-        placeholder="goal"
-        autocomplete="off"
-      />
-      <div class="composer-row">
-        <select class="composer-select" bind:value={createAssignee} disabled={state.agents.length === 0}>
-          {#if state.agents.length === 0}
-            <option value="">No agents</option>
-          {:else}
-            {#each state.agents as agent (agent.id)}
-              <option value={agent.id}>{agent.id}</option>
-            {/each}
-          {/if}
-        </select>
-        <button
-          class="composer-button"
-          on:click={handleCreate}
-          disabled={creating || !createTaskId.trim() || !createGoal.trim() || !createAssignee}
-        >
-          {creating ? '…' : 'Create Draft'}
-        </button>
-      </div>
-      {#if createError}
-        <div class="composer-error">{createError}</div>
-      {/if}
-    </div>
-
-    <div class="section-list">
-      {#each sortedTasks as task (task.id)}
-        <TaskCard {task} />
-      {/each}
-    </div>
-  </section>
+    <div class="nav-section-label top-gap">SECONDARY</div>
+    <div class="nav-item">Agents</div>
+    <div class="nav-item">Worktrees</div>
+  </nav>
 
   <footer class="footer">
     <button class="footer-button" on:click={openTerminal}>Open Terminal</button>
+    <span class="version">v0.6.0</span>
   </footer>
-</section>
+</aside>
 
 <style>
-  .panel {
-    position: relative;
-    width: 320px;
-    overflow: hidden;
+  .sidebar {
+    width: 240px;
+    min-width: 240px;
+    max-width: 240px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
     background: var(--bg-primary);
-    border: 1px solid rgba(255, 255, 255, 0.04);
-    border-radius: var(--radius-panel);
-    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+    border-right: 1px solid var(--border-color);
+    overflow: hidden;
   }
 
   .header {
@@ -194,12 +96,13 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
+    gap: 8px;
     padding: 0 12px;
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border-color);
   }
 
   .wordmark {
-    flex: 0 0 auto;
     color: var(--accent-purple);
     font-size: 14px;
     font-weight: 700;
@@ -209,112 +112,69 @@
   .header-controls {
     display: flex;
     align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    min-width: 0;
-    flex: 1 1 auto;
+    gap: 4px;
   }
 
-  .workspace-path {
-    max-width: 132px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    text-align: right;
-  }
-
-  .settings-button {
+  .icon-btn {
     width: 24px;
     height: 24px;
-    flex: 0 0 auto;
     border-radius: 6px;
     color: var(--text-secondary);
     font-size: 14px;
-    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     transition: color 120ms ease, background-color 120ms ease;
   }
 
-  .settings-button:hover {
+  .icon-btn:hover {
     color: var(--text-primary);
     background: var(--bg-secondary);
   }
 
-  .divider {
-    width: 100%;
-    height: 1px;
-    background: var(--border-color);
-  }
-
-  .section {
-    padding: 8px 0;
-  }
-
-  .section-heading {
+  .nav {
+    flex: 1;
+    padding: 12px 0 8px;
     display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    padding: 4px 12px;
+    flex-direction: column;
+    overflow-y: auto;
   }
 
-  .section-label {
+  .nav-section-label {
     color: var(--text-secondary);
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.5px;
+    padding: 4px 12px;
   }
 
-  .composer-shell {
+  .nav-section-label.top-gap {
+    margin-top: 12px;
+  }
+
+  .nav-item {
     display: flex;
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px 12px 10px;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    border-radius: 6px;
+    margin: 1px 6px;
+    cursor: pointer;
+    border-left: 2px solid transparent;
+    transition: color 120ms ease, background-color 120ms ease;
   }
 
-  .composer-row {
-    display: flex;
-    gap: 8px;
-  }
-
-  .composer-input,
-  .composer-select,
-  .composer-button {
-    height: 30px;
-    border-radius: 8px;
-    font-size: 12px;
-  }
-
-  .composer-input,
-  .composer-select {
-    width: 100%;
-    padding: 0 10px;
+  .nav-item:hover {
+    color: var(--text-primary);
     background: var(--bg-secondary);
+  }
+
+  .nav-item.active {
     color: var(--text-primary);
-    border: 1px solid var(--border-color);
-  }
-
-  .composer-button {
-    min-width: 96px;
-    padding: 0 12px;
-    background: var(--accent-purple);
-    color: var(--text-primary);
-  }
-
-  .composer-button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .composer-error {
-    font-size: 11px;
-    color: var(--accent-red);
-  }
-
-  .section-list {
-    display: flex;
-    flex-direction: column;
+    background: var(--bg-secondary);
+    border-left-color: var(--accent-purple);
   }
 
   .review-badge {
@@ -332,17 +192,19 @@
   }
 
   .footer {
-    height: 40px;
+    height: 36px;
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: space-between;
+    padding: 0 12px;
     border-top: 1px solid var(--border-color);
+    flex-shrink: 0;
   }
 
   .footer-button {
     color: var(--text-secondary);
-    font-size: 12px;
-    padding: 6px 10px;
+    font-size: 11px;
+    padding: 4px 8px;
     border-radius: 6px;
     transition: color 120ms ease, background-color 120ms ease;
   }
@@ -350,5 +212,11 @@
   .footer-button:hover {
     color: var(--text-primary);
     background: var(--bg-secondary);
+  }
+
+  .version {
+    color: var(--text-secondary);
+    font-size: 10px;
+    opacity: 0.5;
   }
 </style>
