@@ -20,30 +20,31 @@ Desktop-first local workspace for coordinating multiple AI coding agents.
 
 ## Public repo layout
 
-- `crates/owlscale-protocol/` — shared Rust protocol crate and CLI
-- `owlscale-app/` — Tauri desktop app
-- `docs/architecture.md` — public architecture note for this release surface
+- `owlscale-app/` — Tauri v2 desktop app (Svelte 4 frontend, Rust backend)
+- `owlscale-app/src-tauri/src/` — Rust: state aggregation, worktree registry, git_ops, Tauri commands
+- `owlscale-app/src/` — Svelte: three-focus workbench UI
 
 ## Build
-
-### Protocol CLI
-
-```bash
-cargo run -p owlscale-protocol --bin owlscale -- --help
-```
-
-### Desktop app
 
 ```bash
 cd owlscale-app
 npm install
-cd src-tauri
-cargo tauri build
+npm run desktop:build   # or: cargo tauri build inside src-tauri/
+```
+
+Dev mode:
+
+```bash
+npm run desktop:dev
 ```
 
 ## Current status
 
-The protocol layer and first desktop task lifecycle slice are now public. The desktop app supports the full create → dispatch → start → return → review (accept/reject) loop. Worktree integration and real agent runtime binding are designed but not yet shipped in this public surface.
+v0.7.1-alpha. The desktop app ships a three-focus workbench (Review / Execution / Setup) with a status-aware inspector. The full create → dispatch → review (accept/reject) loop is usable. Worktree isolation is wired: coding worktrees are created and bound at dispatch time; review worktrees are created with an enforced owner from the workspace agent policy.
+
+Derived state fields (review_worktree_ready, coding_worktree_missing, ownership_override, review_owner_id) are computed by the Rust backend and surfaced directly to the UI — the frontend does not re-derive business semantics from raw data.
+
+Remaining before stable: Create Task UI, workspace picker dialog, and global agent registry layer.
 
 `owlscale` is incubated privately and released to this public repo in stable slices. This public repository is the release surface and collaboration surface, not the full internal design workspace.
 
