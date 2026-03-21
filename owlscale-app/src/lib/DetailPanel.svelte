@@ -13,6 +13,8 @@
   let accepting = false
   let rejecting = false
   let creatingReview = false
+  let rebasingReview = false
+  let attentionActionError: string | null = null
 
   // D1: dispatch editor state
   let dispatchAssignee: string | null = null
@@ -38,6 +40,7 @@
     ? worktrees.find(w => w.id === `review-${task!.id}`) ?? null
     : null
   $: codingWorktrees = worktrees.filter(w => w.type === 'coding')
+  $: attentionItems = task?.needs_attention ?? []
 
   // D1: derive override (assignee differs from workspace default agent)
   $: dispatchIsOverride = dispatchAssignee !== null &&
@@ -134,6 +137,27 @@
       dispatching = false
     }
   }
+
+  const handleManualRefresh = async () => {
+    attentionActionError = null
+    try { await invoke('manual_refresh') }
+    catch (e) {
+      attentionActionError = typeof e === 'string' ? e : 'Refresh failed'
+      console.error('manual_refresh failed:', e)
+    }
+  }
+
+  const handleRebaseReview = async () => {
+    if (!task) return
+    rebasingReview = true
+    attentionActionError = null
+    try { await invoke('rebase_review_worktree', { taskId: task.id }) }
+    catch (e) {
+      attentionActionError = typeof e === 'string' ? e : 'Rebase failed'
+      console.error('rebase_review_worktree failed:', e)
+    }
+    finally { rebasingReview = false }
+  }
 </script>
 
 {#if !task}
@@ -159,7 +183,7 @@
           on:click={handleAccept}
           disabled={accepting || rejecting}
         >
-          {accepting ? '✓ Accepting…' : '✓ Accept Task'}
+          {accepting ? '✓ Accepting…' : task.review_stale ? '✓ Ignore and Accept' : '✓ Accept Task'}
         </button>
 
         <!-- Secondary: Open worktrees side-by-side -->
@@ -296,6 +320,41 @@
 
     {/if}
     <!-- accepted / rejected: no action zone rendered -->
+
+    {#if task.review_stale || attentionItems.length > 0}
+      <section class="detail-section attention-section">
+        <h3 class="section-title">Needs Attention</h3>
+        <div class="attention-list">
+          {#if task.review_stale}
+            <div class="attention-item">⚠ Base changed after review started</div>
+          {/if}
+          {#each attentionItems as issue (issue)}
+            {#if issue !== 'needs_attention:review_stale'}
+              <div class="attention-item">{issue.replace('needs_attention:', '')}</div>
+            {/if}
+          {/each}
+        </div>
+        <div class="attention-actions">
+          <button class="action-secondary" on:click={handleManualRefresh}>
+            Refresh
+          </button>
+          {#if task.review_stale}
+            <button class="action-secondary" on:click={handleRebaseReview} disabled={rebasingReview}>
+              {rebasingReview ? 'Rebasing…' : 'Rebase & Re-review'}
+            </button>
+          {/if}
+          {#if codingWorktree}
+            {@const codingId = codingWorktree.id}
+            <button class="action-secondary" on:click={() => handleOpenWorktree(codingId)}>
+              Open Coding Worktree
+            </button>
+          {/if}
+        </div>
+        {#if attentionActionError}
+          <div class="dispatch-error">{attentionActionError}</div>
+        {/if}
+      </section>
+    {/if}
 
     <!-- Assignee -->
     {#if task.assignee}
@@ -667,6 +726,30 @@
     align-items: center;
     gap: 8px;
     padding: 12px 20px 0;
+  }
+
+  .attention-section {
+    border-bottom: 1px solid var(--border-color);
+    padding-bottom: 16px;
+  }
+
+  .attention-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .attention-item {
+    font-size: 12px;
+    color: var(--accent-orange);
+  }
+
+  .attention-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 12px;
   }
 
   .meta-label {

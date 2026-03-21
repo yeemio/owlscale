@@ -49,6 +49,11 @@ pub fn create_review_worktree(
     )
 }
 
+pub fn rebase_review_worktree(owlscale_dir: &Path, task_id: &str) -> Result<(), String> {
+    let review = ensure_registered_worktree_exists(owlscale_dir, &review_worktree_id(task_id))?;
+    run_git(Path::new(&review.path), &["rebase", "main"])
+}
+
 pub fn ensure_registered_worktree_exists(
     owlscale_dir: &Path,
     worktree_id: &str,
@@ -224,6 +229,7 @@ mod tests {
         run_git_raw(dir.path(), &["commit", "-m", "init"]).unwrap();
         let owlscale_dir = dir.path().join(".owlscale");
         std::fs::create_dir_all(&owlscale_dir).unwrap();
+        std::fs::create_dir_all(owlscale_dir.join("tasks")).unwrap();
         std::fs::create_dir_all(owlscale_dir.join("packets")).unwrap();
         std::fs::create_dir_all(owlscale_dir.join("returns")).unwrap();
         std::fs::write(
@@ -240,13 +246,12 @@ mod tests {
     }
 
     fn mark_task_returned(owlscale_dir: &Path, task_id: &str) {
-        let state_path = owlscale_dir.join("state.json");
-        let raw = std::fs::read_to_string(&state_path).unwrap();
-        let mut state: Value = serde_json::from_str(&raw).unwrap();
-        let task = state["tasks"].get_mut(task_id).unwrap();
+        let task_path = owlscale_dir.join("tasks").join(format!("{task_id}.json"));
+        let raw = std::fs::read_to_string(&task_path).unwrap();
+        let mut task: Value = serde_json::from_str(&raw).unwrap();
         task["status"] = Value::String("returned".into());
         task["returned_at"] = Value::String("2026-03-19T12:00:00+08:00".into());
-        std::fs::write(&state_path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
+        std::fs::write(&task_path, serde_json::to_string_pretty(&task).unwrap()).unwrap();
     }
 
     fn run_git_raw(cwd: &Path, args: &[&str]) -> Result<(), String> {

@@ -3,15 +3,19 @@
   import { createEventDispatcher } from 'svelte'
   import SettingsPanel from './SettingsPanel.svelte'
   import { showSettingsStore } from './settingsStore'
-  import type { WorkspaceState, FocusMode } from '../types'
+  import type { WorkspaceState, SidebarView } from '../types'
 
   export let state: WorkspaceState | null
-  export let focusMode: FocusMode = 'setup'
+  export let currentView: SidebarView = 'setup'
 
-  const dispatch = createEventDispatcher<{ select: string }>()
+  const dispatch = createEventDispatcher<{ select: string; navigate: SidebarView; seeded: string }>()
 
   const handleRefresh = async (): Promise<void> => {
     try { await invoke('manual_refresh') } catch (e) { console.error(e) }
+  }
+
+  const handleChooseFolder = async (): Promise<void> => {
+    try { await invoke('open_workspace_picker') } catch (e) { console.error(e) }
   }
 
   const openTerminal = (): void => {
@@ -40,6 +44,15 @@
     dispatch('select', taskId)
   }
 
+  function navigate(view: SidebarView): void {
+    dispatch('navigate', view)
+  }
+
+  function handleSeeded(event: CustomEvent<string>): void {
+    showSettingsStore.set(false)
+    dispatch('seeded', event.detail)
+  }
+
   $: pendingReview = state?.pending_review ?? 0
 </script>
 
@@ -47,29 +60,36 @@
   <header class="header">
     <div class="wordmark">owlscale</div>
     <div class="header-controls">
+      <button class="icon-btn" on:click={handleChooseFolder} title="Choose Folder">📂</button>
       <button class="icon-btn" on:click={handleRefresh} title="Refresh">↻</button>
       <button class="icon-btn" on:click={() => showSettingsStore.set(!$showSettingsStore)} title="Settings (⌘,)">⚙</button>
     </div>
   </header>
 
   {#if $showSettingsStore}
-    <SettingsPanel currentDir={state?.dir ?? null} on:close={() => showSettingsStore.set(false)} />
+    <SettingsPanel
+      currentDir={state?.dir ?? null}
+      agents={state?.agents ?? []}
+      agentPolicy={state?.agent_policy ?? null}
+      on:close={() => showSettingsStore.set(false)}
+      on:seeded={handleSeeded}
+    />
   {/if}
 
   <nav class="nav">
     <div class="nav-section-label">PRIMARY</div>
-    <div class="nav-item" class:active={focusMode === 'review'}>
+    <button class="nav-item" class:active={currentView === 'review'} on:click={() => navigate('review')}>
       Review
       {#if pendingReview > 0}
         <span class="review-badge">{pendingReview}</span>
       {/if}
-    </div>
-    <div class="nav-item" class:active={focusMode === 'execution'}>Tasks</div>
-    <div class="nav-item">Activity</div>
+    </button>
+    <button class="nav-item" class:active={currentView === 'execution'} on:click={() => navigate('execution')}>Tasks</button>
+    <button class="nav-item" class:active={currentView === 'activity'} on:click={() => navigate('activity')}>Activity</button>
 
     <div class="nav-section-label top-gap">SECONDARY</div>
-    <div class="nav-item">Agents</div>
-    <div class="nav-item">Worktrees</div>
+    <button class="nav-item" class:active={currentView === 'agents'} on:click={() => navigate('agents')}>Agents</button>
+    <button class="nav-item" class:active={currentView === 'worktrees'} on:click={() => navigate('worktrees')}>Worktrees</button>
   </nav>
 
   <footer class="footer">
@@ -164,6 +184,8 @@
     cursor: pointer;
     border-left: 2px solid transparent;
     transition: color 120ms ease, background-color 120ms ease;
+    width: calc(100% - 12px);
+    text-align: left;
   }
 
   .nav-item:hover {

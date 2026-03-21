@@ -43,6 +43,19 @@ pub fn start_watcher(
             return;
         }
 
+        let repo_git_dir = owlscale_dir
+            .parent()
+            .map(|project_root| project_root.join(".git"))
+            .filter(|git_dir| git_dir.exists());
+        if let Some(git_dir) = repo_git_dir.as_ref() {
+            if let Err(e) = watcher.watch(git_dir, RecursiveMode::Recursive) {
+                eprintln!(
+                    "[owlscale watcher] failed to watch git dir {}: {e}",
+                    git_dir.display()
+                );
+            }
+        }
+
         // Allow first event immediately
         let mut last_emit = Instant::now() - Duration::from_secs(10);
 
@@ -61,17 +74,26 @@ pub fn start_watcher(
                             if name == "state.json"
                                 || name == "roster.json"
                                 || name == "worktrees.json"
+                                || name == "HEAD"
                             {
                                 return true;
                             }
                         }
-                        // Also trigger on changes in packets/ or returns/ subdirs
+                        // Also trigger on changes in packets/, returns/, or tasks/ subdirs
                         if let Some(parent) = p.parent() {
                             if let Some(dir_name) = parent.file_name().and_then(|n| n.to_str()) {
-                                if dir_name == "packets" || dir_name == "returns" {
+                                if dir_name == "packets"
+                                    || dir_name == "returns"
+                                    || dir_name == "tasks"
+                                {
                                     return true;
                                 }
                             }
+                        }
+                        if p.components()
+                            .any(|component| component.as_os_str() == ".git")
+                        {
+                            return true;
                         }
                         false
                     });

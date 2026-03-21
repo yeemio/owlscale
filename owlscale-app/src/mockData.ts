@@ -40,6 +40,8 @@ export const mockState: WorkspaceState = {
       coding_worktree_assigned: true,
       coding_worktree_missing: false,
       ownership_override: false,
+      needs_attention: [],
+      review_stale: false,
     },
     {
       id: 'fix-login-bug',
@@ -53,6 +55,8 @@ export const mockState: WorkspaceState = {
       coding_worktree_assigned: false,
       coding_worktree_missing: false,
       ownership_override: false,
+      needs_attention: [],
+      review_stale: false,
     },
     {
       id: 'add-rate-limiting',
@@ -66,6 +70,8 @@ export const mockState: WorkspaceState = {
       coding_worktree_assigned: false,
       coding_worktree_missing: false,
       ownership_override: false,
+      needs_attention: ['needs_attention:stalled'],
+      review_stale: false,
     },
     {
       id: 'write-api-docs',
@@ -79,6 +85,8 @@ export const mockState: WorkspaceState = {
       coding_worktree_assigned: false,
       coding_worktree_missing: false,
       ownership_override: false,
+      needs_attention: [],
+      review_stale: false,
     },
   ],
 }

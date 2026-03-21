@@ -17,6 +17,8 @@ export interface TaskInfo {
   coding_worktree_assigned: boolean
   coding_worktree_missing: boolean
   ownership_override: boolean
+  needs_attention: string[]
+  review_stale: boolean
 }
 
 export interface AgentInfo {

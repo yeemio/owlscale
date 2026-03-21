@@ -21,6 +21,7 @@
   }
 
   $: badge = badgeConfig[task.status]
+  $: hasAttention = task.needs_attention.length > 0
 </script>
 
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
@@ -44,6 +45,9 @@
     {#if worktreeOwnerOverride}
       <span class="override-tag">OVERRIDE</span>
     {/if}
+    {#if hasAttention}
+      <span class="attention-tag">ATTN</span>
+    {/if}
   </div>
 
   <!-- Row 2: goal summary -->
@@ -57,6 +61,16 @@
       </span>
       {#if codingWorktreeMissing}
         <span class="wt-signal signal-danger">Coding WT missing</span>
+      {/if}
+      {#if task.review_stale}
+        <span class="wt-signal signal-danger">Base changed</span>
+      {/if}
+      {#if hasAttention}
+        {#each task.needs_attention as issue (issue)}
+          {#if issue !== 'needs_attention:review_stale'}
+            <span class="wt-signal signal-danger">{issue.replace('needs_attention:', '')}</span>
+          {/if}
+        {/each}
       {/if}
     </div>
   {/if}
@@ -130,6 +144,22 @@
     background: rgba(255, 159, 10, 0.18);
     color: var(--accent-orange);
     border: 1px solid rgba(255, 159, 10, 0.35);
+  }
+
+  .attention-tag {
+    display: inline-flex;
+    align-items: center;
+    height: 14px;
+    padding: 0 5px;
+    border-radius: 3px;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: rgba(255, 69, 58, 0.18);
+    color: var(--accent-red);
+    border: 1px solid rgba(255, 69, 58, 0.35);
   }
 
   .task-goal {

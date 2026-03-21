@@ -1,13 +1,16 @@
 <script lang="ts">
   import { createEventDispatcher, onMount } from 'svelte'
   import { invoke } from '@tauri-apps/api/core'
-  import type { AppConfig } from '../types'
+  import type { AgentInfo, AgentPolicy, AppConfig } from '../types'
 
   export let currentDir: string | null
+  export let agents: AgentInfo[] = []
+  export let agentPolicy: AgentPolicy | null = null
 
-  const dispatch = createEventDispatcher<{ close: void }>()
+  const dispatch = createEventDispatcher<{ close: void; seeded: string }>()
 
   const APP_VERSION = '0.6.0'
+  const SHOW_DEV_UTILITIES = true
 
   let settings: AppConfig = {
     workspace_dir: null,
@@ -18,6 +21,15 @@
   let loading = true
   let busy = false
   let error: string | null = null
+  let devBusy = false
+  let devMessage: string | null = null
+  let executionAgentId: string | null = null
+  let reviewAgentId: string | null = null
+
+  $: if (!busy) {
+    executionAgentId = agentPolicy?.default_execution_agent_id ?? null
+    reviewAgentId = agentPolicy?.default_review_agent_id ?? null
+  }
 
   const loadSettings = async () => {
     loading = true
@@ -35,9 +47,8 @@
     busy = true
     error = null
     try {
-      const selected = await invoke<string | null>('pick_workspace_dir')
+      const selected = await invoke<string | null>('open_workspace_picker')
       if (selected) {
-        await invoke('set_workspace_dir', { path: selected })
         settings = { ...settings, workspace_dir: selected }
       }
     } catch (e) {
@@ -98,6 +109,51 @@
     dispatch('close')
   }
 
+  const handleSeedReviewDemo = async () => {
+    devBusy = true
+    devMessage = null
+    error = null
+    try {
+      const taskId = await invoke<string>('dev_seed_returned_task', {
+        goal: 'Demo review task',
+        summary: 'Generated from Settings for review/demo flow verification.',
+      })
+      devMessage = `Generated returned task: ${taskId}`
+      dispatch('seeded', taskId)
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to generate demo review task.'
+    } finally {
+      devBusy = false
+    }
+  }
+
+  const handleAgentPolicyChange = async (
+    kind: 'execution' | 'review',
+    event: Event,
+  ) => {
+    const target = event.currentTarget as HTMLSelectElement
+    const nextValue = target.value || null
+    const nextExecutionAgentId = kind === 'execution' ? nextValue : executionAgentId
+    const nextReviewAgentId = kind === 'review' ? nextValue : reviewAgentId
+
+    busy = true
+    error = null
+    try {
+      await invoke<AgentPolicy>('set_agent_policy', {
+        executionAgentId: nextExecutionAgentId,
+        reviewAgentId: nextReviewAgentId,
+      })
+      executionAgentId = nextExecutionAgentId
+      reviewAgentId = nextReviewAgentId
+    } catch (e) {
+      error = e instanceof Error ? e.message : 'Failed to update default agents.'
+      executionAgentId = agentPolicy?.default_execution_agent_id ?? null
+      reviewAgentId = agentPolicy?.default_review_agent_id ?? null
+    } finally {
+      busy = false
+    }
+  }
+
   onMount(loadSettings)
 </script>
 
@@ -156,6 +212,52 @@
       <div class="settings-divider"></div>
 
       <div class="settings-section">
+        <div class="section-heading">Default Agents</div>
+
+        {#if agents.length === 0}
+          <div class="setting-hint">No agents in roster.</div>
+        {:else}
+          <div class="setting-row stacked-row">
+            <div class="setting-copy">
+              <div class="setting-label">Default Execution Agent</div>
+              <div class="setting-hint">Used to prefill dispatch for new draft tasks.</div>
+            </div>
+            <select
+              class="interval-select full-width-select"
+              value={executionAgentId ?? ''}
+              on:change={(event) => handleAgentPolicyChange('execution', event)}
+              disabled={busy}
+            >
+              <option value="">None</option>
+              {#each agents as agent (agent.id)}
+                <option value={agent.id}>{agent.name} ({agent.id})</option>
+              {/each}
+            </select>
+          </div>
+
+          <div class="setting-row stacked-row">
+            <div class="setting-copy">
+              <div class="setting-label">Default Review Agent</div>
+              <div class="setting-hint">Used when creating review worktrees for returned tasks.</div>
+            </div>
+            <select
+              class="interval-select full-width-select"
+              value={reviewAgentId ?? ''}
+              on:change={(event) => handleAgentPolicyChange('review', event)}
+              disabled={busy}
+            >
+              <option value="">None</option>
+              {#each agents as agent (agent.id)}
+                <option value={agent.id}>{agent.name} ({agent.id})</option>
+              {/each}
+            </select>
+          </div>
+        {/if}
+      </div>
+
+      <div class="settings-divider"></div>
+
+      <div class="settings-section">
         <div class="section-heading">Notifications &amp; Refresh</div>
 
         <label class="setting-row toggle-row">
@@ -193,6 +295,36 @@
       </div>
 
       <div class="settings-divider"></div>
+
+      {#if SHOW_DEV_UTILITIES}
+        <div class="settings-section">
+          <div class="section-heading">Development &amp; Demo</div>
+
+          <div class="setting-row">
+            <div class="setting-copy">
+              <div class="setting-label">Generate returned review task</div>
+              <div class="setting-hint">
+                Creates a returned task in the current workspace so review flows can be demonstrated
+                and verified without hand-editing files.
+              </div>
+            </div>
+            <button
+              class="action-button"
+              type="button"
+              on:click={handleSeedReviewDemo}
+              disabled={busy || devBusy || !currentDir}
+            >
+              {devBusy ? 'Generating…' : 'Generate'}
+            </button>
+          </div>
+
+          {#if devMessage}
+            <div class="dev-success">{devMessage}</div>
+          {/if}
+        </div>
+
+        <div class="settings-divider"></div>
+      {/if}
 
       <div class="settings-section about-section">
         <div class="section-heading">About</div>
@@ -298,6 +430,11 @@
     gap: 12px;
   }
 
+  .stacked-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
   .setting-copy {
     flex: 1 1 auto;
     min-width: 0;
@@ -345,6 +482,10 @@
   .interval-select:focus {
     outline: none;
     border-color: var(--accent-purple);
+  }
+
+  .full-width-select {
+    width: 100%;
   }
 
   .about-section {
@@ -423,6 +564,12 @@
   .settings-error {
     padding: 0 12px 12px;
     color: var(--accent-red);
+    font-size: 11px;
+  }
+
+  .dev-success {
+    padding: 10px 12px 0;
+    color: var(--accent-green);
     font-size: 11px;
   }
 </style>

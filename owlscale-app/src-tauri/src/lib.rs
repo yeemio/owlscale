@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::image::Image;
@@ -11,10 +12,12 @@ mod config;
 mod git_ops;
 mod state_reader;
 mod watcher;
+mod workspace_registry;
 mod worktrees;
 
 use config::{load_config, save_config, AppConfig};
 use state_reader::{TaskEvent, WorkspaceState};
+use workspace_registry::WorkspaceRegistryEntry;
 use worktrees::RegisteredWorktree;
 
 pub struct AppState {
@@ -49,22 +52,111 @@ fn normalize_workspace_dir(path: &Path) -> PathBuf {
     }
 }
 
+fn repo_root_from_common_dir(common_dir: &Path) -> Option<PathBuf> {
+    if common_dir.file_name().and_then(|value| value.to_str()) == Some(".git") {
+        return common_dir.parent().map(Path::to_path_buf);
+    }
+
+    for ancestor in common_dir.ancestors() {
+        if ancestor.file_name().and_then(|value| value.to_str()) == Some(".git") {
+            return ancestor.parent().map(Path::to_path_buf);
+        }
+    }
+
+    None
+}
+
+fn git_workspace_root(path: &Path) -> Result<PathBuf, String> {
+    let candidate = if path.ends_with(".owlscale") {
+        path.parent().unwrap_or(path)
+    } else {
+        path
+    };
+
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(candidate)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .map_err(|e| format!("workspace_not_git: failed to run git: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!(
+            "workspace_not_git: choose a Git repository or a folder inside one{}",
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(" ({stderr})")
+            }
+        ));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err("workspace_not_git: git returned an empty repository root".to_string());
+    }
+
+    let repo_root = PathBuf::from(stdout);
+    let common_output = Command::new("git")
+        .arg("-C")
+        .arg(candidate)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .map_err(|e| format!("workspace_not_git: failed to inspect git common dir: {e}"))?;
+
+    if !common_output.status.success() {
+        return Ok(repo_root);
+    }
+
+    let common_stdout = String::from_utf8_lossy(&common_output.stdout)
+        .trim()
+        .to_string();
+    if common_stdout.is_empty() {
+        return Ok(repo_root);
+    }
+
+    let common_root = repo_root_from_common_dir(Path::new(&common_stdout));
+    if let Some(root) = common_root {
+        if root.join(".owlscale").is_dir() {
+            return Ok(root);
+        }
+    }
+
+    Ok(repo_root)
+}
+
 fn validated_workspace_dir(path: &Path) -> Result<PathBuf, String> {
-    let owlscale_dir = normalize_workspace_dir(path);
+    let repo_root = git_workspace_root(path)?;
+    let owlscale_dir = normalize_workspace_dir(&repo_root);
     if !owlscale_dir.exists() {
-        return Err(format!("No .owlscale/ found at {}", path.display()));
+        return Err(format!("No .owlscale/ found at {}", repo_root.display()));
     }
     Ok(owlscale_dir)
 }
 
+fn initialize_or_validate_workspace_dir(path: &Path) -> Result<PathBuf, String> {
+    let repo_root = git_workspace_root(path)?;
+    let owlscale_dir = normalize_workspace_dir(&repo_root);
+    if owlscale_dir.exists() {
+        validated_workspace_dir(&repo_root)
+    } else {
+        state_reader::initialize_workspace_direct(&repo_root)
+    }
+}
+
 fn resolve_startup_workspace_dir(config: &AppConfig) -> Option<PathBuf> {
     if let Some(saved) = config.workspace_dir.as_deref() {
-        let path = normalize_workspace_dir(Path::new(saved));
-        if path.exists() && path.is_dir() {
+        if let Ok(path) = validated_workspace_dir(Path::new(saved)) {
             return Some(path);
         }
     }
-    find_owlscale_dir()
+    if let Ok(Some(project_root)) = workspace_registry::newest_ready_workspace() {
+        if let Ok(path) = validated_workspace_dir(&project_root) {
+            return Some(path);
+        }
+    }
+    find_owlscale_dir().and_then(|dir| validated_workspace_dir(&dir).ok())
 }
 
 fn current_owlscale_dir(state: &tauri::State<'_, AppState>) -> Result<PathBuf, String> {
@@ -81,9 +173,7 @@ fn required_review_agent_id(owlscale_dir: &Path) -> Result<String, String> {
     workspace
         .agent_policy
         .and_then(|policy| policy.default_review_agent_id)
-        .ok_or_else(|| {
-            "ownership_required: default review agent is not configured".to_string()
-        })
+        .ok_or_else(|| "ownership_required: default review agent is not configured".to_string())
 }
 
 fn refresh_workspace_state(
@@ -130,12 +220,20 @@ fn activate_workspace_dir(
         config_guard.clone()
     };
     save_config(&config_to_save);
+    workspace_registry::upsert_workspace_registry(
+        &owlscale_dir,
+        &chrono::Local::now().to_rfc3339(),
+    )?;
 
     update_tray_icon(app, ws.pending_review);
     rebuild_tray_menu(app, &ws);
     app.emit("owlscale://state-changed", &ws)
         .map_err(|e| e.to_string())?;
-    let cancel = watcher::start_watcher(owlscale_dir, app.clone(), Arc::clone(&state.workspace_state));
+    let cancel = watcher::start_watcher(
+        owlscale_dir,
+        app.clone(),
+        Arc::clone(&state.workspace_state),
+    );
     if let Ok(mut cancel_guard) = state.watcher_cancel.lock() {
         *cancel_guard = Some(cancel);
     }
@@ -272,6 +370,23 @@ fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppConfig, String> 
 }
 
 #[tauri::command]
+fn set_agent_policy(
+    execution_agent_id: Option<String>,
+    review_agent_id: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<state_reader::AgentPolicy, String> {
+    let dir = current_owlscale_dir(&state)?;
+    let policy = state_reader::set_agent_policy_direct(
+        &dir,
+        execution_agent_id.as_deref(),
+        review_agent_id.as_deref(),
+    )?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(policy)
+}
+
+#[tauri::command]
 fn get_task_packet(task_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
     let owlscale_dir = current_owlscale_dir(&state)?;
     state_reader::read_task_packet(&owlscale_dir, &task_id)
@@ -364,9 +479,22 @@ async fn open_workspace_picker(
     let Some(selected) = pick_workspace_dir(app.clone()).await? else {
         return Ok(None);
     };
-    let owlscale_dir = validated_workspace_dir(Path::new(&selected))?;
+    let owlscale_dir = initialize_or_validate_workspace_dir(Path::new(&selected))?;
     activate_workspace_dir(&state, &app, owlscale_dir)?;
-    Ok(Some(selected))
+    let project_root = workspace_registry::project_root_from_owlscale(
+        &state
+            .owlscale_dir
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone()
+            .ok_or_else(|| "workspace_not_loaded: workspace activation failed".to_string())?,
+    );
+    Ok(Some(project_root.display().to_string()))
+}
+
+#[tauri::command]
+fn get_workspace_registry() -> Result<Vec<WorkspaceRegistryEntry>, String> {
+    workspace_registry::list_workspace_registry()
 }
 
 #[tauri::command]
@@ -534,6 +662,38 @@ fn create_review_worktree(
 }
 
 #[tauri::command]
+fn rebase_review_worktree(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
+    let dir = current_owlscale_dir(&state)?;
+    ensure_task_status(&dir, &task_id, &["returned"])?;
+    git_ops::rebase_review_worktree(&dir, &task_id)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn dev_seed_returned_task(
+    task_id: Option<String>,
+    goal: String,
+    summary: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<String, String> {
+    let dir = current_owlscale_dir(&state)?;
+    let final_task_id = state_reader::create_task_direct(&dir, &goal, task_id.as_deref())?;
+    let review_agent_id = required_review_agent_id(&dir)?;
+    let coding = git_ops::create_coding_worktree(&dir, &final_task_id, Some(&review_agent_id))?;
+    state_reader::dispatch_task_direct(&dir, &final_task_id, &review_agent_id, Some(&coding.id))?;
+    let return_summary = summary.unwrap_or_else(|| format!("Returned via dev seed for '{}'", goal));
+    state_reader::mark_task_returned_direct(&dir, &final_task_id, &return_summary)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(final_task_id)
+}
+
+#[tauri::command]
 fn open_worktree(
     worktree_id: String,
     state: tauri::State<'_, AppState>,
@@ -684,6 +844,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_workspace_state,
             get_settings,
+            set_agent_policy,
             get_task_packet,
             list_worktrees,
             accept_task,
@@ -697,6 +858,8 @@ pub fn run() {
             create_coding_worktree,
             bind_task_worktree,
             create_review_worktree,
+            rebase_review_worktree,
+            dev_seed_returned_task,
             open_worktree,
             manual_refresh,
             scan_workspaces,
@@ -706,6 +869,7 @@ pub fn run() {
             set_refresh_interval,
             pick_workspace_dir,
             open_workspace_picker,
+            get_workspace_registry,
             open_workspace_in_terminal,
         ])
         .run(tauri::generate_context!())
@@ -714,14 +878,24 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_workspace_dir, required_review_agent_id, validated_workspace_dir};
+    use super::{
+        git_workspace_root, initialize_or_validate_workspace_dir, normalize_workspace_dir,
+        required_review_agent_id, validated_workspace_dir,
+    };
+    use crate::{git_ops, state_reader};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn setup_workspace(state: &str) -> TempDir {
         let dir = TempDir::new().unwrap();
         let ws = dir.path().join(".owlscale");
+        Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .output()
+            .unwrap();
         fs::create_dir_all(ws.join("packets")).unwrap();
         fs::write(ws.join("state.json"), state).unwrap();
         fs::write(ws.join("roster.json"), r#"{"agents":{}}"#).unwrap();
@@ -761,19 +935,187 @@ mod tests {
     fn validated_workspace_dir_accepts_workspace_root_or_owlscale_dir() {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("demo");
+        fs::create_dir_all(&root).unwrap();
+        Command::new("git").arg("init").arg(&root).output().unwrap();
         fs::create_dir_all(root.join(".owlscale")).unwrap();
+        let expected = root
+            .join(".owlscale")
+            .canonicalize()
+            .unwrap_or_else(|_| root.join(".owlscale"));
 
         let from_root = validated_workspace_dir(&root).unwrap();
-        assert_eq!(from_root, root.join(".owlscale"));
+        assert_eq!(
+            from_root.canonicalize().unwrap_or(from_root.clone()),
+            expected
+        );
 
         let from_owlscale = validated_workspace_dir(&root.join(".owlscale")).unwrap();
-        assert_eq!(from_owlscale, root.join(".owlscale"));
+        assert_eq!(
+            from_owlscale
+                .canonicalize()
+                .unwrap_or(from_owlscale.clone()),
+            expected
+        );
     }
 
     #[test]
     fn validated_workspace_dir_rejects_missing_owlscale() {
         let dir = TempDir::new().unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg(dir.path())
+            .output()
+            .unwrap();
         let err = validated_workspace_dir(dir.path()).unwrap_err();
         assert!(err.contains("No .owlscale/ found"));
+    }
+
+    #[test]
+    fn initialize_or_validate_workspace_dir_bootstraps_missing_workspace() {
+        let dir = TempDir::new().unwrap();
+        let project_root = dir.path().join("demo");
+        fs::create_dir_all(&project_root).unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg(&project_root)
+            .output()
+            .unwrap();
+
+        let owlscale_dir = initialize_or_validate_workspace_dir(&project_root).unwrap();
+        assert!(owlscale_dir.join("tasks").exists());
+        assert!(owlscale_dir.join("state.json").exists());
+        assert!(owlscale_dir.join("roster.json").exists());
+        assert!(owlscale_dir.join("worktrees.json").exists());
+    }
+
+    #[test]
+    fn git_workspace_root_accepts_subdirectory_inside_repo() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("demo");
+        let nested = root.join("src/components");
+        fs::create_dir_all(&nested).unwrap();
+        Command::new("git").arg("init").arg(&root).output().unwrap();
+        let expected = root.canonicalize().unwrap_or(root.clone());
+
+        let repo_root = git_workspace_root(&nested).unwrap();
+        assert_eq!(repo_root.canonicalize().unwrap_or(repo_root), expected);
+    }
+
+    #[test]
+    fn validated_workspace_dir_accepts_git_worktree_directory() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("demo");
+        let branch_worktree = dir.path().join("demo-review");
+        fs::create_dir_all(&root).unwrap();
+        Command::new("git").arg("init").arg(&root).output().unwrap();
+        fs::create_dir_all(root.join(".owlscale")).unwrap();
+        fs::write(
+            root.join(".owlscale").join("state.json"),
+            r#"{"version":1,"tasks":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".owlscale").join("roster.json"),
+            r#"{"agents":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join(".owlscale").join("worktrees.json"),
+            r#"{"version":1,"worktrees":{}}"#,
+        )
+        .unwrap();
+
+        Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args([
+                "worktree",
+                "add",
+                branch_worktree.to_str().unwrap(),
+                "-b",
+                "review-copy",
+            ])
+            .output()
+            .unwrap();
+
+        let owlscale_dir = validated_workspace_dir(&branch_worktree).unwrap();
+        let expected = root
+            .join(".owlscale")
+            .canonicalize()
+            .unwrap_or_else(|_| root.join(".owlscale"));
+        assert_eq!(
+            owlscale_dir.canonicalize().unwrap_or(owlscale_dir),
+            expected
+        );
+    }
+
+    #[test]
+    fn initialize_or_validate_workspace_dir_rejects_non_git_directory() {
+        let dir = TempDir::new().unwrap();
+        let project_root = dir.path().join("plain-folder");
+        fs::create_dir_all(&project_root).unwrap();
+
+        let err = initialize_or_validate_workspace_dir(&project_root).unwrap_err();
+        assert!(err.starts_with("workspace_not_git:"));
+    }
+
+    #[test]
+    fn stable_alpha_backend_smoke_path() {
+        let dir = TempDir::new().unwrap();
+        let repo_root = dir.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        Command::new("git")
+            .arg("init")
+            .arg(&repo_root)
+            .output()
+            .unwrap();
+
+        let owlscale_dir = initialize_or_validate_workspace_dir(&repo_root).unwrap();
+        state_reader::set_agent_policy_direct(
+            &owlscale_dir,
+            Some("executor-default"),
+            Some("review-default"),
+        )
+        .unwrap();
+
+        let task_id = state_reader::create_task_direct(&owlscale_dir, "smoke", None).unwrap();
+        let coding =
+            git_ops::create_coding_worktree(&owlscale_dir, &task_id, Some("executor-default"))
+                .unwrap();
+        state_reader::dispatch_task_direct(
+            &owlscale_dir,
+            &task_id,
+            "executor-default",
+            Some(&coding.id),
+        )
+        .unwrap();
+        state_reader::mark_task_returned_direct(&owlscale_dir, &task_id, "smoke return").unwrap();
+
+        let review =
+            git_ops::create_review_worktree(&owlscale_dir, &task_id, "review-default").unwrap();
+
+        let workspace = state_reader::read_workspace_state(&owlscale_dir).unwrap();
+        let task = workspace
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .unwrap();
+        assert_eq!(task.status, "returned");
+        assert_eq!(task.assignee.as_deref(), Some("executor-default"));
+        assert_eq!(task.review_owner_id.as_deref(), Some("review-default"));
+        assert!(task.review_worktree_ready);
+        assert_eq!(workspace.pending_review, 1);
+        assert_eq!(review.agent_id.as_deref(), Some("review-default"));
+
+        state_reader::accept_task_direct(&owlscale_dir, &task_id).unwrap();
+
+        let workspace = state_reader::read_workspace_state(&owlscale_dir).unwrap();
+        let task = workspace
+            .tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .unwrap();
+        assert_eq!(task.status, "accepted");
+        assert_eq!(workspace.pending_review, 0);
     }
 }
