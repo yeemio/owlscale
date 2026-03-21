@@ -603,6 +603,24 @@ fn get_return_packet(task_id: String, state: tauri::State<'_, AppState>) -> Resu
 }
 
 #[tauri::command]
+fn get_task_diff(task_id: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let dir = current_owlscale_dir(&state)?;
+    git_ops::get_task_coding_diff(&dir, &task_id)
+}
+
+#[tauri::command]
+fn repair_coding_worktree(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<RegisteredWorktree, String> {
+    let dir = current_owlscale_dir(&state)?;
+    let worktree = git_ops::repair_coding_worktree(&dir, &task_id)?;
+    refresh_workspace_state(&state, &app, &dir)?;
+    Ok(worktree)
+}
+
+#[tauri::command]
 fn get_task_timeline(
     task_id: Option<String>,
     state: tauri::State<'_, AppState>,
@@ -871,6 +889,8 @@ pub fn run() {
             open_workspace_picker,
             get_workspace_registry,
             open_workspace_in_terminal,
+            get_task_diff,
+            repair_coding_worktree,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

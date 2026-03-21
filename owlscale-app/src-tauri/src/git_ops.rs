@@ -54,6 +54,96 @@ pub fn rebase_review_worktree(owlscale_dir: &Path, task_id: &str) -> Result<(), 
     run_git(Path::new(&review.path), &["rebase", "main"])
 }
 
+/// Re-attach a coding worktree whose directory was deleted but whose git branch
+/// and registry entry still exist. Runs `git worktree prune` first to clear
+/// stale admin files, then `git worktree add {path} {branch}`.
+pub fn repair_coding_worktree(
+    owlscale_dir: &Path,
+    task_id: &str,
+) -> Result<RegisteredWorktree, String> {
+    let worktree_id = coding_worktree_id(task_id);
+    let registry = load_worktree_registry(owlscale_dir)?;
+    let record = registry
+        .get(&worktree_id)
+        .ok_or_else(|| format!("worktree '{worktree_id}' not found in registry"))?;
+
+    let path = PathBuf::from(&record.path);
+    if path.exists() {
+        return Err(format!(
+            "worktree path already exists — no repair needed: {}",
+            path.display()
+        ));
+    }
+
+    let branch = record.branch.clone();
+    let repo_root = repo_root(owlscale_dir)?;
+
+    // Clear stale .git/worktrees admin entries before re-adding.
+    let _ = Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(&repo_root)
+        .output();
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+    }
+
+    // Reattach to the existing branch (no -b flag).
+    run_git(
+        &repo_root,
+        &[
+            "worktree",
+            "add",
+            path.to_str().ok_or("invalid worktree path")?,
+            &branch,
+        ],
+    )?;
+
+    upsert_worktree(
+        owlscale_dir,
+        &worktree_id,
+        WorktreeRecord {
+            path: record.path.clone(),
+            branch: branch.clone(),
+            kind: record.kind.clone(),
+            agent_id: record.agent_id.clone(),
+            status: "ready".to_string(),
+        },
+    )
+}
+
+/// Return the unified diff between `main` and the coding branch for `task_id`.
+/// Capped at ~200 KB to avoid UI performance issues.
+pub fn get_task_coding_diff(owlscale_dir: &Path, task_id: &str) -> Result<String, String> {
+    let repo_root = repo_root(owlscale_dir)?;
+    let branch = coding_branch(task_id);
+
+    if !branch_exists(&repo_root, &branch)? {
+        return Err(format!("coding branch '{branch}' not found"));
+    }
+
+    let output = Command::new("git")
+        .args(["diff", &format!("main...{branch}")])
+        .current_dir(&repo_root)
+        .output()
+        .map_err(|e| format!("run git diff: {e}"))?;
+
+    if !output.status.success() {
+        return Err(stderr_message("git diff", &output.stderr));
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    const MAX_BYTES: usize = 200_000;
+    if text.len() > MAX_BYTES {
+        let cut = text[..MAX_BYTES].rfind('\n').unwrap_or(MAX_BYTES);
+        return Ok(format!(
+            "{}\n\n[... diff truncated at ~200KB ...]",
+            &text[..cut]
+        ));
+    }
+    Ok(text)
+}
+
 pub fn ensure_registered_worktree_exists(
     owlscale_dir: &Path,
     worktree_id: &str,

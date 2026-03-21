@@ -9,12 +9,26 @@
 
   let packetContent: string | null = null
   let returnContent: string | null = null
+  let diffContent: string | null = null
+  let diffExpanded = false
+  let diffLoading = false
   let timeline: TaskEvent[] = []
   let accepting = false
   let rejecting = false
+  let rejectDraft = false
+  let rejectReason = ''
   let creatingReview = false
   let rebasingReview = false
   let attentionActionError: string | null = null
+  let repairingWorktree = false
+
+  const ATTENTION_META: Record<string, { msg: string; icon: string }> = {
+    worktree_missing:       { icon: '⬡', msg: 'Coding worktree path is missing' },
+    return_state_mismatch:  { icon: '⟳', msg: 'State sync mismatch — worktree still marked working' },
+    ownership_drift:        { icon: '⚑', msg: 'Agent assignment drift detected' },
+    stalled:                { icon: '⏱', msg: 'No activity for >30 min — may be stuck' },
+    review_stale:           { icon: '⚠', msg: 'Base changed after review started' },
+  }
 
   // D1: dispatch editor state
   let dispatchAssignee: string | null = null
@@ -56,14 +70,18 @@
     dispatchWorktreeMode = task?.worktree_id ? 'bind' : 'create'
     dispatchBindWorktreeId = task?.worktree_id ?? null
     dispatchError = null
+    rejectDraft = false
+    rejectReason = ''
 
     if (currentTaskId) loadTaskDetails(currentTaskId)
-    else { packetContent = null; returnContent = null; timeline = [] }
+    else { packetContent = null; returnContent = null; diffContent = null; diffExpanded = false; timeline = [] }
   }
 
   async function loadTaskDetails(taskId: string) {
     packetContent = null
     returnContent = null
+    diffContent = null
+    diffExpanded = false
     timeline = []
 
     try { packetContent = await invoke('get_task_packet', { taskId }) }
@@ -74,7 +92,33 @@
 
     try { timeline = await invoke('get_task_timeline', { taskId }) }
     catch { timeline = [] }
+
+    diffLoading = true
+    try { diffContent = await invoke('get_task_diff', { taskId }) }
+    catch { diffContent = null }
+    finally { diffLoading = false }
   }
+
+  function computeDiffStats(diff: string): { added: number; removed: number; files: number } {
+    let added = 0, removed = 0, files = 0
+    for (const line of diff.split('\n')) {
+      if (line.startsWith('+') && !line.startsWith('+++')) added++
+      else if (line.startsWith('-') && !line.startsWith('---')) removed++
+      else if (line.startsWith('diff ')) files++
+    }
+    return { added, removed, files }
+  }
+
+  function getDiffLineClass(line: string): string {
+    if (line.startsWith('+') && !line.startsWith('+++')) return 'diff-add'
+    if (line.startsWith('-') && !line.startsWith('---')) return 'diff-del'
+    if (line.startsWith('@@')) return 'diff-hunk'
+    if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('--- ') || line.startsWith('+++ ')) return 'diff-meta'
+    return ''
+  }
+
+  $: diffStats = diffContent ? computeDiffStats(diffContent) : null
+  $: diffLines = diffContent ? diffContent.split('\n') : []
 
   function formatTime(ts: string): string {
     try {
@@ -101,9 +145,25 @@
   const handleReject = async () => {
     if (!task) return
     rejecting = true
-    try { await invoke('reject_task', { taskId: task.id, reason: null }) }
+    try {
+      await invoke('reject_task', {
+        taskId: task.id,
+        reason: rejectReason.trim() || null,
+      })
+      rejectDraft = false
+      rejectReason = ''
+    }
     catch (e) { console.error('reject failed:', e) }
     finally { rejecting = false }
+  }
+
+  function beginReject() {
+    rejectDraft = true
+  }
+
+  function cancelReject() {
+    rejectDraft = false
+    rejectReason = ''
   }
 
   const handleOpenWorktree = async (worktreeId: string) => {
@@ -158,6 +218,26 @@
     }
     finally { rebasingReview = false }
   }
+
+  const handleRepairWorktree = async () => {
+    if (!task) return
+    repairingWorktree = true
+    attentionActionError = null
+    try { await invoke('repair_coding_worktree', { taskId: task.id }) }
+    catch (e) {
+      attentionActionError = typeof e === 'string' ? e : 'Repair failed'
+      console.error('repair_coding_worktree failed:', e)
+    }
+    finally { repairingWorktree = false }
+  }
+
+  // Derive unique attention codes (strip 'needs_attention:' prefix)
+  $: attentionCodes = [
+    ...new Set([
+      ...attentionItems.map(i => i.replace('needs_attention:', '')),
+      ...(task?.review_stale ? ['review_stale'] : []),
+    ])
+  ]
 </script>
 
 {#if !task}
@@ -208,13 +288,38 @@
 
         <!-- Danger zone: Reject separated -->
         <div class="action-danger-row">
-          <button
-            class="action-danger"
-            on:click={handleReject}
-            disabled={accepting || rejecting}
-          >
-            {rejecting ? '… Rejecting' : '✗ Reject Task'}
-          </button>
+          {#if rejectDraft}
+            <div class="reject-composer">
+              <label class="editor-label" for="reject-reason">Reject reason</label>
+              <textarea
+                id="reject-reason"
+                class="reject-textarea"
+                bind:value={rejectReason}
+                placeholder="Optional. Explain why this task is being rejected."
+                rows="3"
+              />
+              <div class="reject-actions">
+                <button class="action-secondary" on:click={cancelReject} disabled={rejecting}>
+                  Cancel
+                </button>
+                <button
+                  class="action-danger"
+                  on:click={handleReject}
+                  disabled={accepting || rejecting}
+                >
+                  {rejecting ? '… Rejecting' : 'Confirm Reject'}
+                </button>
+              </div>
+            </div>
+          {:else}
+            <button
+              class="action-danger"
+              on:click={beginReject}
+              disabled={accepting || rejecting}
+            >
+              ✗ Reject Task
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -321,34 +426,39 @@
     {/if}
     <!-- accepted / rejected: no action zone rendered -->
 
-    {#if task.review_stale || attentionItems.length > 0}
+    {#if attentionCodes.length > 0}
       <section class="detail-section attention-section">
         <h3 class="section-title">Needs Attention</h3>
-        <div class="attention-list">
-          {#if task.review_stale}
-            <div class="attention-item">⚠ Base changed after review started</div>
-          {/if}
-          {#each attentionItems as issue (issue)}
-            {#if issue !== 'needs_attention:review_stale'}
-              <div class="attention-item">{issue.replace('needs_attention:', '')}</div>
-            {/if}
+        <div class="attention-cards">
+          {#each attentionCodes as code (code)}
+            {@const meta = ATTENTION_META[code] ?? { icon: '!', msg: code }}
+            <div class="attention-card">
+              <div class="attention-card-msg">
+                <span class="attention-icon">{meta.icon}</span>
+                {meta.msg}
+              </div>
+              <div class="attention-card-actions">
+                {#if code === 'worktree_missing'}
+                  <button class="action-secondary" on:click={handleRepairWorktree} disabled={repairingWorktree}>
+                    {repairingWorktree ? 'Repairing…' : 'Repair Worktree'}
+                  </button>
+                  <button class="action-secondary" on:click={handleManualRefresh}>Refresh</button>
+                {:else if code === 'review_stale'}
+                  <button class="action-secondary" on:click={handleRebaseReview} disabled={rebasingReview}>
+                    {rebasingReview ? 'Rebasing…' : 'Rebase & Re-review'}
+                  </button>
+                {:else if code === 'stalled' || code === 'ownership_drift'}
+                  {#if codingWorktree}
+                    {@const cwId = codingWorktree.id}
+                    <button class="action-secondary" on:click={() => handleOpenWorktree(cwId)}>Open Worktree</button>
+                  {/if}
+                  <button class="action-secondary" on:click={handleManualRefresh}>Refresh</button>
+                {:else}
+                  <button class="action-secondary" on:click={handleManualRefresh}>Refresh</button>
+                {/if}
+              </div>
+            </div>
           {/each}
-        </div>
-        <div class="attention-actions">
-          <button class="action-secondary" on:click={handleManualRefresh}>
-            Refresh
-          </button>
-          {#if task.review_stale}
-            <button class="action-secondary" on:click={handleRebaseReview} disabled={rebasingReview}>
-              {rebasingReview ? 'Rebasing…' : 'Rebase & Re-review'}
-            </button>
-          {/if}
-          {#if codingWorktree}
-            {@const codingId = codingWorktree.id}
-            <button class="action-secondary" on:click={() => handleOpenWorktree(codingId)}>
-              Open Coding Worktree
-            </button>
-          {/if}
         </div>
         {#if attentionActionError}
           <div class="dispatch-error">{attentionActionError}</div>
@@ -369,6 +479,13 @@
       <section class="detail-section">
         <h3 class="section-title">Goal</h3>
         <p class="detail-goal">{task.goal}</p>
+      </section>
+    {/if}
+
+    {#if task.rejected_reason}
+      <section class="detail-section">
+        <h3 class="section-title">Reject Reason</h3>
+        <p class="detail-goal">{task.rejected_reason}</p>
       </section>
     {/if}
 
@@ -394,6 +511,48 @@
             <div class="worktree-path">{reviewWorktree.path}</div>
           </div>
         </div>
+      </section>
+    {/if}
+
+    <!-- Changes diff (returned / accepted / rejected + has coding worktree) -->
+    {#if task.worktree_id && (task.status === 'returned' || task.status === 'accepted' || task.status === 'rejected')}
+      <section class="detail-section">
+        <!-- svelte-ignore a11y-click-events-have-key-events -->
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div class="diff-header" on:click={() => diffExpanded = !diffExpanded}>
+          <h3 class="section-title">Changes</h3>
+          <div class="diff-header-right">
+            {#if diffLoading}
+              <span class="diff-loading">loading…</span>
+            {:else if diffStats && (diffStats.added > 0 || diffStats.removed > 0 || diffStats.files > 0)}
+              <span class="diff-summary">
+                {#if diffStats.files > 0}
+                  <span class="diff-files">{diffStats.files}f</span>
+                {/if}
+                {#if diffStats.added > 0}
+                  <span class="diff-stat-add">+{diffStats.added}</span>
+                {/if}
+                {#if diffStats.removed > 0}
+                  <span class="diff-stat-del">−{diffStats.removed}</span>
+                {/if}
+              </span>
+            {:else if !diffLoading}
+              <span class="diff-empty-label">—</span>
+            {/if}
+            <span class="diff-toggle" aria-hidden="true">{diffExpanded ? '▲' : '▼'}</span>
+          </div>
+        </div>
+        {#if diffExpanded}
+          {#if !diffContent || diffContent.trim() === ''}
+            <div class="diff-no-changes">No changes on this branch yet.</div>
+          {:else}
+            <div class="diff-viewer">
+              {#each diffLines as line, i (i)}
+                <div class="diff-line {getDiffLineClass(line)}">{line || '\u200b'}</div>
+              {/each}
+            </div>
+          {/if}
+        {/if}
       </section>
     {/if}
 
@@ -574,6 +733,35 @@
     border-top: 1px solid var(--border-color);
   }
 
+  .reject-composer {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .reject-textarea {
+    width: 100%;
+    min-height: 72px;
+    resize: vertical;
+    padding: 8px 10px;
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  .reject-textarea:focus {
+    outline: none;
+    border-color: var(--accent-red);
+  }
+
+  .reject-actions {
+    display: flex;
+    gap: 8px;
+  }
+
   .action-danger {
     width: 100%;
     height: 30px;
@@ -733,23 +921,40 @@
     padding-bottom: 16px;
   }
 
-  .attention-list {
+  .attention-cards {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     margin-top: 8px;
   }
 
-  .attention-item {
-    font-size: 12px;
-    color: var(--accent-orange);
+  .attention-card {
+    background: rgba(255, 159, 10, 0.06);
+    border: 1px solid rgba(255, 159, 10, 0.2);
+    border-radius: 8px;
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
   }
 
-  .attention-actions {
+  .attention-card-msg {
+    font-size: 12px;
+    color: var(--accent-orange);
     display: flex;
-    gap: 8px;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .attention-icon {
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+
+  .attention-card-actions {
+    display: flex;
+    gap: 6px;
     flex-wrap: wrap;
-    margin-top: 12px;
   }
 
   .meta-label {
@@ -860,6 +1065,102 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+
+  /* ── P1-A: Changes diff viewer ─────────────────────────────── */
+  .diff-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    user-select: none;
+    padding: 2px 0;
+  }
+
+  .diff-header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .diff-summary {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    font-family: ui-monospace, "SF Mono", monospace;
+  }
+
+  .diff-files {
+    color: var(--text-secondary);
+    font-size: 10px;
+  }
+
+  .diff-stat-add {
+    color: var(--accent-green);
+    font-weight: 600;
+  }
+
+  .diff-stat-del {
+    color: var(--accent-red);
+    font-weight: 600;
+  }
+
+  .diff-loading,
+  .diff-empty-label {
+    font-size: 10px;
+    color: var(--text-secondary);
+  }
+
+  .diff-toggle {
+    font-size: 9px;
+    color: var(--text-secondary);
+  }
+
+  .diff-no-changes {
+    font-size: 11px;
+    color: var(--text-secondary);
+    padding: 8px 0 4px;
+  }
+
+  .diff-viewer {
+    font-family: ui-monospace, "SF Mono", monospace;
+    font-size: 10px;
+    line-height: 1.4;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 8px 0;
+    margin-top: 6px;
+    max-height: 400px;
+    overflow-y: auto;
+    overflow-x: auto;
+  }
+
+  .diff-line {
+    padding: 0 10px;
+    white-space: pre;
+    color: var(--text-secondary);
+  }
+
+  .diff-line.diff-add {
+    background: rgba(48, 209, 88, 0.08);
+    color: var(--accent-green);
+  }
+
+  .diff-line.diff-del {
+    background: rgba(255, 69, 58, 0.08);
+    color: var(--accent-red);
+  }
+
+  .diff-line.diff-hunk {
+    color: var(--accent-blue);
+    background: rgba(10, 132, 255, 0.06);
+  }
+
+  .diff-line.diff-meta {
+    color: var(--text-secondary);
+    opacity: 0.7;
   }
 
   .detail-pre {

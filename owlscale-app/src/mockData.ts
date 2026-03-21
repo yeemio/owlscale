@@ -42,6 +42,7 @@ export const mockState: WorkspaceState = {
       ownership_override: false,
       needs_attention: [],
       review_stale: false,
+      rejected_reason: null,
     },
     {
       id: 'fix-login-bug',
@@ -57,6 +58,7 @@ export const mockState: WorkspaceState = {
       ownership_override: false,
       needs_attention: [],
       review_stale: false,
+      rejected_reason: null,
     },
     {
       id: 'add-rate-limiting',
@@ -72,6 +74,7 @@ export const mockState: WorkspaceState = {
       ownership_override: false,
       needs_attention: ['needs_attention:stalled'],
       review_stale: false,
+      rejected_reason: null,
     },
     {
       id: 'write-api-docs',
@@ -87,6 +90,7 @@ export const mockState: WorkspaceState = {
       ownership_override: false,
       needs_attention: [],
       review_stale: false,
+      rejected_reason: null,
     },
   ],
 }

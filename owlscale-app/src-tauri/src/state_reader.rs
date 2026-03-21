@@ -20,6 +20,7 @@ pub struct TaskInfo {
     pub ownership_override: bool,
     pub needs_attention: Vec<String>,
     pub review_stale: bool,
+    pub rejected_reason: Option<String>,
 }
 
 /// An agent entry from roster.json.
@@ -265,6 +266,14 @@ fn task_review_stale(entry: &TaskEntry) -> bool {
         .unwrap_or(false)
 }
 
+fn task_rejected_reason(entry: &TaskEntry) -> Option<String> {
+    entry
+        .extra
+        .get("rejected_reason")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
 fn parse_task_timestamp(
     entry: &TaskEntry,
     key: &str,
@@ -466,6 +475,7 @@ pub fn read_workspace_state(owlscale_dir: &Path) -> Result<WorkspaceState, Strin
             .unwrap_or(false);
         let declared_override = task_declares_override(&entry);
         let review_stale = task_review_stale(&entry);
+        let rejected_reason = task_rejected_reason(&entry);
         let mut needs_attention = Vec::new();
 
         if entry.status == "in_progress" && coding_worktree_missing {
@@ -514,6 +524,7 @@ pub fn read_workspace_state(owlscale_dir: &Path) -> Result<WorkspaceState, Strin
             ownership_override,
             needs_attention,
             review_stale,
+            rejected_reason,
         });
     }
 
@@ -894,9 +905,23 @@ pub fn reject_task_direct(
         "rejected_at".to_string(),
         serde_json::Value::String(now_iso8601()),
     );
+    let normalized_reason = reason.map(str::trim).filter(|value| !value.is_empty());
+    match normalized_reason {
+        Some(value) => {
+            task.extra.insert(
+                "rejected_reason".to_string(),
+                serde_json::Value::String(value.to_string()),
+            );
+        }
+        None => {
+            task.extra.remove("rejected_reason");
+        }
+    }
     write_task_entry_direct(owlscale_dir, task_id, &task)?;
 
-    let reason_part = reason.map(|r| format!(" reason={r}")).unwrap_or_default();
+    let reason_part = normalized_reason
+        .map(|r| format!(" reason={r}"))
+        .unwrap_or_default();
     write_log(owlscale_dir, &format!("REJECT  {task_id}{reason_part}"));
     Ok(())
 }
@@ -1451,6 +1476,35 @@ Body
 
         let return_packet = read_return_packet(&ws_dir, "task-1").unwrap();
         assert!(return_packet.contains("Implemented the requested change"));
+    }
+
+    #[test]
+    fn reject_task_direct_persists_reason_and_logs_it() {
+        let dir = setup_workspace(
+            r#"{"version":1,"tasks":{"task-1":{"status":"returned","assignee":"cc-opus","worktree_id":"coding-task-1"}}}"#,
+            r#"{"agents":{"cc-opus":{"name":"Claude Code Opus","role":"executor"}}}"#,
+        );
+        let ws_dir = dir.path().join(".owlscale");
+
+        reject_task_direct(&ws_dir, "task-1", Some("Needs stronger validation coverage")).unwrap();
+
+        let ws = read_workspace_state(&ws_dir).unwrap();
+        let task = ws.tasks.iter().find(|task| task.id == "task-1").unwrap();
+        assert_eq!(task.status, "rejected");
+        assert_eq!(
+            task.rejected_reason.as_deref(),
+            Some("Needs stronger validation coverage")
+        );
+
+        let log_dir = ws_dir.join("log");
+        let log_file = fs::read_dir(&log_dir)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let log_content = fs::read_to_string(log_file).unwrap();
+        assert!(log_content.contains("REJECT  task-1 reason=Needs stronger validation coverage"));
     }
 
     #[test]

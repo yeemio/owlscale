@@ -19,6 +19,7 @@ export interface TaskInfo {
   ownership_override: boolean
   needs_attention: string[]
   review_stale: boolean
+  rejected_reason: string | null
 }
 
 export interface AgentInfo {
