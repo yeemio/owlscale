@@ -40,11 +40,13 @@ npm run desktop:dev
 
 ## Current status
 
-v0.7.1-alpha. The desktop app ships a three-focus workbench (Review / Execution / Setup) with a status-aware inspector. The full create → dispatch → review (accept/reject) loop is usable. Worktree isolation is wired: coding worktrees are created and bound at dispatch time; review worktrees are created with an enforced owner from the workspace agent policy.
+v0.7.2-alpha. The desktop app now ships a usable desktop control plane for local multi-agent coordination: workspace selection and registry, Create Task sheet, inline dispatch, review worktrees, accept/reject with audit trail, return diff inspection, and per-issue recovery UI for `needs_attention` states.
 
-Derived state fields (review_worktree_ready, coding_worktree_missing, ownership_override, review_owner_id) are computed by the Rust backend and surfaced directly to the UI — the frontend does not re-derive business semantics from raw data.
+The backend now reads tasks from `tasks/*.json`, performs reconciliation in the backend (not the UI), computes derived review/worktree/ownership fields for the frontend, and detects `review_stale` when a review base diverges from the current main branch.
 
-Remaining before stable: Create Task UI, workspace picker dialog, and global agent registry layer.
+Secondary panels for Agents, Worktrees, and Activity are now connected and populated. The public release surface is no longer just the core review loop; it also exposes the surrounding operational context needed to coordinate and recover work across agents and worktrees.
+
+Still alpha: the product is intentionally local-first and human-gated. Advanced routing, hosted/cloud driver protocols, automated merge workflows, and richer team policy layers remain future work rather than current guarantees.
 
 `owlscale` is incubated privately and released to this public repo in stable slices. This public repository is the release surface and collaboration surface, not the full internal design workspace.
 

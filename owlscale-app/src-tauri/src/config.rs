@@ -1,10 +1,33 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AppConfig {
     pub workspace_dir: Option<String>,
     pub launch_at_login: bool,
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
+    #[serde(default = "default_refresh_interval")]
+    pub refresh_interval_secs: u64,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_refresh_interval() -> u64 {
+    3
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            workspace_dir: None,
+            launch_at_login: false,
+            notifications_enabled: true,
+            refresh_interval_secs: 3,
+        }
+    }
 }
 
 fn config_path() -> PathBuf {

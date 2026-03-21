@@ -1,4 +1,5 @@
 export type FocusMode = 'review' | 'execution' | 'setup'
+export type SidebarView = FocusMode | 'activity' | 'agents' | 'worktrees'
 
 export interface AgentPolicy {
   default_execution_agent_id: string | null
@@ -51,6 +52,13 @@ export interface AppConfig {
   launch_at_login: boolean
   notifications_enabled: boolean
   refresh_interval_secs: number
+}
+
+export interface WorkspaceRegistryEntry {
+  path: string
+  display_name: string
+  last_opened_at: string
+  status: string
 }
 
 export interface TaskEvent {

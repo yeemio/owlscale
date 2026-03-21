@@ -2531,10 +2531,10 @@ dependencies = [
 
 [[package]]
 name = "owlscale-app"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
+ "chrono",
  "notify",
- "owlscale-protocol",
  "serde",
  "serde_json",
  "tauri",
